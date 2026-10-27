@@ -48,6 +48,7 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 
 Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`,
 `create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
+PLCopenXML: `export_plcopen`, `import_plcopen`. Ladder: `ladder_check`, `ladder_import`, `ladder_export`.
 Online: `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
 Trace: `trace_setup`, `trace_run`, `trace_stop`, `trace_wait`, `trace_save`.
 Escape hatch: `exec_script` (runs IronPython in the IDE; use `dir()` to explore the API).
@@ -95,6 +96,34 @@ but not drawn. Variable names are relative to the application: no `Application.`
 download silently does nothing. A trace stops itself once its buffer has filled; `trace_save` copes with that. It returns a table of the points where any value
 changed (`time_ms` plus one column per variable); sampling follows the task cycle.
 
+### Ladder and other graphical code (PLCopenXML)
+
+`get_pou` and `set_pou` handle text only: the declaration of any POU, and the body of an ST POU.
+`create_pou` can make an `ld`/`fbd` POU, but its body cannot be set from text (`set_pou` says so).
+Graphical code goes in as PLCopenXML:
+
+The ladder tools use two Claude Code skills on the Linux side, installed side by side in
+`~/.claude/skills` (or set `CTRLX_SKILLS_DIR`): **ctrlx-engineer** (`st_to_plcopenxml.py`, the
+converter) and **codesys-lad** (the ladder compiler and `ld_trace.py`). Claude passes the source
+text to the tool; the server runs the skill's scripts on it. Nothing is copied to the Windows PC.
+
+1. `ladder_check sources={"FB_X.st": "<text>"}` compiles without touching the IDE and returns the
+   converter's warnings plus `trace`: every output as a boolean expression, per network. Check it
+   against the intent. `sources` maps a `.st` file name to its text (a GVL is named after its
+   file); `libs` holds declarations of library POUs the rungs call. A source error raises, with
+   the network and the position.
+2. Ask the user, then `logout` (the IDE refuses to add objects while logged in; the controller
+   keeps running), and `export_plcopen` the objects you are about to replace as a backup.
+3. `ladder_import` with the same arguments compiles and imports in one step; nothing is imported
+   if the source does not compile. The XML goes through the tunnel as text and the bridge imports
+   it from a temp file on the Windows side, so no shared folder is needed. `conflict` is
+   `Replace`, `Copy` or `Skip` for objects that already exist; confirm `Replace` with the user.
+4. `build`, fix errors, `login` as the user directs.
+
+To review ladder that is already in the project, `ladder_export paths=[...]` returns the same
+`trace` for it. `include_xml=True` adds the raw PLCopenXML. `import_plcopen` and `export_plcopen`
+move raw XML for anything you built another way.
+
 ## How the bridge works (and why)
 
 These were found by trial; they explain the odd structure of `bridge/bridge.py`.
@@ -113,6 +142,10 @@ These were found by trial; they explain the odd structure of `bridge/bridge.py`.
 - **Stale online object.** The bridge caches one online object per application. After a login or
   logout in the IDE it can go stale: reads fail with `Invalid variable reference` and writes do
   nothing. `read_var` and `write_var` retry once with a fresh object.
+- **Imports go where they are called.** `import_xml` on the project puts new objects at the
+  project root; on the application it puts them in the application. `import_plcopen` calls it
+  on `parent` (default the application). Objects that already exist are matched and replaced
+  either way.
 - **`build`** is `application.build()`, not a project method. Build messages come from
   `system.get_message_categories(True)`; do not call `system.clear_messages()` (it left the
   Messages pane broken). Compile problems can also surface only at `login`.
@@ -125,7 +158,9 @@ These were found by trial; they explain the odd structure of `bridge/bridge.py`.
 
 These do not run against a real IDE. What has been run for real: ping, tree, POU read/write,
 save_project, build, login with download, logout, run_state, plc_start, read_var, write_var, and
-the trace flow above. Not exercised yet: `create_pou`/`create_dut`/`create_gvl`/`delete_object`,
+the trace flow above, and PLCopenXML export/import (`export_xml`, and `import_xml` with text written
+to a temp file) including a ladder block, driven through `exec_script`. Not exercised yet: the
+`export_plcopen`, `import_plcopen` and `ladder_*` tools end to end, `create_pou`/`create_dut`/`create_gvl`/`delete_object`,
 `plc_stop`, trigger-based traces, and starting the bridge with `--runscript` at IDE startup
 (`AUTORUN=1`; the menu route is what has been tested).
 

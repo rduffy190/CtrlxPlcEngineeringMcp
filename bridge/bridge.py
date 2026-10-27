@@ -252,7 +252,48 @@ def h_set_pou(a):
     if a.get("declaration") is not None:
         n.textual_declaration.replace(a["declaration"])
     if a.get("implementation") is not None:
+        if not getattr(n, "has_textual_implementation", False):
+            raise ValueError("'%s' has a graphical body (LD/FBD/SFC); it cannot be set from text. "
+                             "Use import_plcopen with PLCopenXML." % a["path"])
         n.textual_implementation.replace(a["implementation"])
+    return True
+
+
+def h_export_plcopen(a):
+    """Export objects as PLCopenXML and return the XML text."""
+    objs = [_find(p) for p in a["paths"]]
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_export.xml")
+    try:
+        _proj().export_xml(objs, tmp, bool(a.get("recursive", True)), False, True)
+        with open(tmp, "rb") as f:
+            raw = f.read()
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"xml": raw.decode("utf-8-sig", "replace")}
+
+
+def h_import_plcopen(a):
+    """Import PLCopenXML (text, or a path on this machine) into `parent`.
+
+    Imports go to the object the call is made on, so call it on the application, not the project:
+    on the project the new objects land at the project root. The application must be logged out.
+    """
+    parent = _find(a["parent"])
+    conflict = _enum(ConflictResolve, a.get("conflict", "Replace"))
+    tmp = None
+    if a.get("xml") is not None:
+        tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_import.xml")
+        with open(tmp, "wb") as f:
+            f.write(a["xml"].encode("utf-8"))
+        src = tmp
+    else:
+        src = a["file"]
+    try:
+        parent.import_xml(conflict, src, False)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
     return True
 
 
@@ -260,7 +301,10 @@ def h_create_pou(a):
     parent = _find(a["parent"])
     kind = _enum(PouType, a.get("kind", "Program"))
     lang = _enum(ImplementationLanguages, a.get("language", "st"))
-    n = parent.create_pou(a["name"], kind, lang)
+    if a.get("return_type"):
+        n = parent.create_pou(a["name"], kind, lang, a["return_type"])
+    else:
+        n = parent.create_pou(a["name"], kind, lang)
     return {"name": n.get_name()}
 
 

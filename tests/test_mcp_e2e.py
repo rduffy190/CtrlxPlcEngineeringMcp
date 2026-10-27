@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import tempfile
 import time
 import types
 
@@ -48,8 +49,18 @@ class Node:
         self._children.append(child)
         return child
 
-    def create_pou(self, name, kind, lang):
-        return self.add(Node(name))
+    def create_pou(self, name, kind, lang, return_type=None):
+        n = self.add(Node(name))
+        n.return_type = return_type
+        return n
+
+    def import_xml(self, conflict, data_or_path, folders):
+        with open(data_or_path, "rb") as f:
+            imported.append((self._name, conflict, f.read().decode("utf-8")))
+
+    def export_xml(self, objs, path, recursive, folders, plain):
+        with open(path, "wb") as f:
+            f.write(b"\xef\xbb\xbf<project>" + ",".join(o.get_name() for o in objs).encode() + b"</project>")
 
     def create_dut(self, name):
         return self.add(Node(name))
@@ -69,6 +80,7 @@ class Online:
         return 42
 
 
+imported = []
 app = Node("Application", text=False)
 app.add(Node("PLC_PRG"))
 proj = Node("proj", text=False)
@@ -85,7 +97,8 @@ for k, v in dict(projects=types.SimpleNamespace(primary=proj),
                  online=types.SimpleNamespace(create_online_application=lambda a: Online()),
                  system=sysstub, trace=None,
                  PouType=types.SimpleNamespace(Program="Program", FunctionBlock="FB"),
-                 ImplementationLanguages=types.SimpleNamespace(st="st")).items():
+                 ImplementationLanguages=types.SimpleNamespace(st="st"),
+                 ConflictResolve=types.SimpleNamespace(Replace="Replace", Copy="Copy", Skip="Skip")).items():
     setattr(builtins, k, v)
 
 import bridge  # noqa: E402
@@ -102,15 +115,43 @@ def data(res):
         return text
 
 
+def make_skills():
+    """Stand-ins for the ctrlx-engineer converter and the codesys-lad tracer."""
+    d = tempfile.mkdtemp(prefix="skills")
+    for skill, script, code in (
+        ("ctrlx-engineer", "st_to_plcopenxml.py", """
+import sys
+a = sys.argv[1:]
+out = a[a.index("-o") + 1]
+libs = [a[i + 1] for i, x in enumerate(a) if x == "--lib"]
+srcs = [x for x in a if x.endswith(".st") and x not in libs]
+if any("BAD" in open(s).read() for s in srcs):
+    print("FB_A.st: network 1: unknown element", file=sys.stderr)
+    sys.exit(2)
+if libs:
+    print("libs: " + ",".join(l.rsplit("/", 1)[-1] for l in libs), file=sys.stderr)
+open(out, "w").write("<project>" + ",".join(s.rsplit("/", 1)[-1] for s in srcs) + "</project>")
+"""),
+        ("codesys-lad", "ld_trace.py", """
+import sys
+print("TRACE " + open(sys.argv[1], encoding="utf-8").read())
+""")):
+        os.makedirs(os.path.join(d, skill, "scripts"))
+        with open(os.path.join(d, skill, "scripts", script), "w") as f:
+            f.write(code)
+    return d
+
+
 async def run():
     params = StdioServerParameters(
         command=sys.executable, args=[os.path.join(ROOT, "server", "server.py")],
-        env={**os.environ, "CTRLX_BRIDGE_PORT": PORT})
+        env={**os.environ, "CTRLX_BRIDGE_PORT": PORT, "CTRLX_SKILLS_DIR": make_skills()})
     async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         tools = {t.name for t in (await s.list_tools()).tools}
         expected = {"ping", "open_project", "save_project", "get_tree", "get_pou", "set_pou",
-                    "create_pou", "create_dut", "create_gvl", "delete_object", "build",
+                    "create_pou", "export_plcopen", "import_plcopen", "ladder_check", "ladder_import",
+                    "ladder_export", "create_dut", "create_gvl", "delete_object", "build",
                     "messages", "login", "logout", "run_state", "plc_start", "plc_stop",
                     "read_var", "write_var", "trace_setup", "trace_run", "trace_stop", "trace_wait",
                     "trace_save", "exec_script"}
@@ -128,6 +169,40 @@ async def run():
         assert pou["declaration"] == "PROGRAM PLC_PRG" and pou["implementation"] == "x := 1;"
 
         await tool("create_pou", parent=APP, name="Motor", kind="FunctionBlock")
+        await tool("create_pou", parent=APP, name="Fn_T", kind="FunctionBlock", return_type="TIME")
+        assert app.get_children(False)[-1].return_type == "TIME"
+        app._children.pop()
+        # graphical POU: declaration yes, body no; XML goes in as text and out as text
+        ld = app.add(Node("FB_Ld", text=False))
+        ld.has_textual_declaration = True
+        bad = await tool("set_pou", path=f"{APP}/FB_Ld", implementation="x")
+        assert bad.isError and "import_plcopen" in bad.content[0].text
+        app._children.remove(ld)
+        assert data(await tool("import_plcopen", xml="<project>é</project>", parent=APP, conflict="Copy")) is True
+        assert imported == [("Application", "Copy", "<project>é</project>")], imported
+        bad = await tool("import_plcopen", parent=APP)
+        assert bad.isError
+        assert (await tool("export_plcopen", paths=[f"{APP}/PLC_PRG"])).content[0].text == "<project>PLC_PRG</project>"
+
+        # ladder: compile with the skill, read back, import as text, export and read back
+        chk = data(await tool("ladder_check", sources={"FB_A.st": "NETWORK x", "GVL_IO.st": "y"},
+                              libs={"ML.st": "FUNCTION ML"}))
+        assert chk["trace"] == "TRACE <project>FB_A.st,GVL_IO.st</project>", chk
+        assert chk["warnings"] == "libs: ML.st", chk
+        for bad_src in ({"../x.st": "y"}, {"x.txt": "y"}):
+            assert (await tool("ladder_check", sources=bad_src)).isError
+        bad = await tool("ladder_check", sources={"FB_A.st": "BAD"})
+        assert bad.isError and "compile failed" in bad.content[0].text and "unknown element" in bad.content[0].text
+        before = len(imported)
+        assert (await tool("ladder_import", sources={"FB_A.st": "BAD"}, parent=APP)).isError
+        assert len(imported) == before, "nothing is imported when the source does not compile"
+        imp = data(await tool("ladder_import", sources={"FB_A.st": "NETWORK x"}, parent=APP))
+        assert imp["imported"] is True and imp["trace"] == "TRACE <project>FB_A.st</project>"
+        assert imported[-1] == ("Application", "Replace", "<project>FB_A.st</project>"), imported
+        ex = data(await tool("ladder_export", paths=[f"{APP}/PLC_PRG"]))
+        assert ex == {"trace": "TRACE <project>PLC_PRG</project>"}, ex
+        ex = data(await tool("ladder_export", paths=[f"{APP}/PLC_PRG"], include_xml=True))
+        assert ex["xml"] == "<project>PLC_PRG</project>"
         await tool("create_gvl", parent=APP, name="GVL")
         await tool("create_dut", parent=APP, name="ST_Axis")
         await tool("delete_object", path=f"{APP}/GVL")

@@ -1,6 +1,7 @@
 """MCP server for ctrlX PLC Engineering. Proxies tool calls to bridge/bridge.py.
 
-Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required).
+Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required),
+CTRLX_SKILLS_DIR (~/.claude/skills; holds ctrlx-engineer and codesys-lad, used by the ladder tools).
 """
 import csv
 import io
@@ -8,6 +9,9 @@ import json
 import re
 import os
 import socket
+import subprocess
+import sys
+import tempfile
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -15,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 HOST = os.environ.get("CTRLX_BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CTRLX_BRIDGE_PORT", "8765"))
 TOKEN = os.environ.get("CTRLX_MCP_TOKEN", "")
+SKILLS = os.environ.get("CTRLX_SKILLS_DIR", os.path.expanduser("~/.claude/skills"))
 
 mcp = FastMCP("ctrlx-engineering")
 
@@ -117,9 +122,133 @@ def set_pou(path: str, declaration: Optional[str] = None, implementation: Option
 
 
 @mcp.tool()
-def create_pou(parent: str, name: str, kind: str = "Program", language: str = "st") -> Any:
-    """Create a POU under parent. kind: Program|FunctionBlock|Function. language: st|ld|fbd..."""
-    return call("create_pou", parent=parent, name=name, kind=kind, language=language)
+def create_pou(parent: str, name: str, kind: str = "Program", language: str = "st",
+               return_type: Optional[str] = None) -> Any:
+    """Create a POU under parent. kind: Program|FunctionBlock|Function. language: st|ld|fbd...
+    A Function needs return_type (e.g. "TIME"). The application must be logged out: the IDE
+    refuses to add objects while logged in. Only the declaration of a graphical POU (ld, fbd,
+    sfc) can be set as text; its body cannot. Build ladder as PLCopenXML (codesys-lad skill)
+    and use import_plcopen."""
+    return call("create_pou", parent=parent, name=name, kind=kind, language=language,
+                return_type=return_type)
+
+
+@mcp.tool()
+def export_plcopen(paths: list[str], recursive: bool = True) -> str:
+    """Export objects as PLCopenXML and return the XML text. Read-only.
+    paths are object paths such as "Device/Plc Logic/Application/PRG_Main". Works for ST and
+    graphical POUs, so use it to read a ladder POU or to back up before an import."""
+    return call("export_plcopen", paths=paths, recursive=recursive)["xml"]
+
+
+@mcp.tool()
+def import_plcopen(xml: Optional[str] = None, file: Optional[str] = None,
+                   parent: str = "Device/Plc Logic/Application",
+                   conflict: str = "Replace") -> Any:
+    """Import PLCopenXML into parent (the application). Give the XML text in xml, or a path on
+    the Windows machine in file. The text route needs no shared folder: build the XML here with
+    ctrlx-engineer's st_to_plcopenxml.py (ladder via the codesys-lad skill) and pass it in.
+    conflict: Replace|Copy|Skip decides what happens to objects that already exist. Replace
+    overwrites them, so confirm with the user first and export a backup. The application must
+    be logged out (the IDE refuses to add objects while logged in); a build follows."""
+    if (xml is None) == (file is None):
+        raise ValueError("give exactly one of xml or file")
+    return call("import_plcopen", xml=xml, file=file, parent=parent, conflict=conflict)
+
+
+def _skill_script(skill: str, script: str) -> str:
+    path = os.path.join(SKILLS, skill, "scripts", script)
+    if not os.path.isfile(path):
+        raise BridgeError(f"{path} not found: install the ctrlx-engineer and codesys-lad skills "
+                          "side by side in ~/.claude/skills, or set CTRLX_SKILLS_DIR")
+    return path
+
+
+def _run_script(args: list[str], timeout: float = 120) -> tuple[int, str]:
+    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def _write_sources(files: dict[str, str], folder: str) -> list[str]:
+    paths = []
+    for name, text in files.items():
+        base = os.path.basename(name)
+        if base != name or not base.endswith(".st"):
+            raise ValueError(f"'{name}': give a plain file name ending in .st (a GVL is named after its file)")
+        path = os.path.join(folder, base)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        paths.append(path)
+    return paths
+
+
+def _trace(xml_path: str) -> str:
+    """Readable form of the ladder bodies in an XML file (ld_trace.py: each output as a boolean expression)."""
+    rc, out = _run_script([_skill_script("codesys-lad", "ld_trace.py"), xml_path])
+    return out if rc == 0 else f"(ld_trace failed)\n{out}"
+
+
+def _compile(sources: dict[str, str], libs: Optional[dict[str, str]], folder: str) -> dict:
+    """Build PLCopenXML from .st sources with ctrlx-engineer's converter. Raises on a source error."""
+    src = _write_sources(sources, folder)
+    args = [_skill_script("ctrlx-engineer", "st_to_plcopenxml.py"), *src, "-o", os.path.join(folder, "Project.xml")]
+    if libs:
+        libdir = os.path.join(folder, "lib")
+        os.makedirs(libdir)
+        for lib in _write_sources(libs, libdir):
+            args += ["--lib", lib]
+    rc, out = _run_script(args)
+    if rc != 0:
+        raise BridgeError(f"ladder/ST compile failed:\n{out}")
+    with open(os.path.join(folder, "Project.xml"), encoding="utf-8-sig") as f:
+        xml = f.read()
+    warnings = "\n".join(l for l in out.splitlines() if not l.startswith("Wrote "))
+    return {"xml": xml, "warnings": warnings, "trace": _trace(os.path.join(folder, "Project.xml"))}
+
+
+@mcp.tool()
+def ladder_check(sources: dict[str, str], libs: Optional[dict[str, str]] = None) -> dict:
+    """Compile ladder (and ST) source to PLCopenXML without touching the IDE, and read it back.
+    sources maps a file name ending in .st to its text, in the form the codesys-lad skill
+    describes: a POU whose body starts with NETWORK is ladder; a GVL is named after its file;
+    DUTs and ST POUs can be included. libs holds declaration files for library POUs the rungs
+    call. Returns the converter's warnings and `trace`: every ladder output written as a boolean
+    expression, per network. Check it against the intent before importing. A source error raises.
+    Needs the ctrlx-engineer and codesys-lad skills (see CTRLX_SKILLS_DIR)."""
+    with tempfile.TemporaryDirectory() as d:
+        r = _compile(sources, libs, d)
+    return {"warnings": r["warnings"], "trace": r["trace"]}
+
+
+@mcp.tool()
+def ladder_import(sources: dict[str, str], libs: Optional[dict[str, str]] = None,
+                  parent: str = "Device/Plc Logic/Application", conflict: str = "Replace") -> dict:
+    """Compile ladder/ST source (as ladder_check) and import it into the application in one step.
+    Objects that already exist are handled by `conflict` (Replace|Copy|Skip); Replace overwrites
+    them, so confirm with the user and keep an export_plcopen backup. The application must be
+    logged out (the IDE refuses to add objects while logged in). Returns the warnings and the
+    ladder readback; then run `build`. Nothing is imported if the source does not compile."""
+    with tempfile.TemporaryDirectory() as d:
+        r = _compile(sources, libs, d)
+    call("import_plcopen", timeout=300, xml=r["xml"], file=None, parent=parent, conflict=conflict)
+    return {"imported": True, "warnings": r["warnings"], "trace": r["trace"]}
+
+
+@mcp.tool()
+def ladder_export(paths: list[str], include_xml: bool = False) -> dict:
+    """Export objects from the IDE and read the ladder back. Read-only.
+    Returns `trace`: every ladder output as a boolean expression, per network, which is the form
+    to analyse or review ladder in. ST bodies are not in it (use get_pou). include_xml adds the
+    raw PLCopenXML (large) for a backup or for comparing with ld_diff.py."""
+    xml = call("export_plcopen", paths=paths, recursive=True)["xml"]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "export.xml")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(xml)
+        r = {"trace": _trace(path)}
+    if include_xml:
+        r["xml"] = xml
+    return r
 
 
 @mcp.tool()
