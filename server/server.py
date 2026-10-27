@@ -155,9 +155,13 @@ def messages() -> Any:
 # ---- online
 
 @mcp.tool()
-def login(app: str, download: bool = True, change: str = "Never") -> Any:
-    """Log in to the application at path `app` (optionally downloading)."""
-    return call("login", timeout=300, app=app, download=download, change=change)
+def login(app: str, change: str, delete_foreign_apps: bool = False) -> Any:
+    """Log in to the application at path `app`. ALWAYS ask the user how to download before calling:
+    `change` is the IDE's online-change option (Never, Try, Force or Keep) and decides whether the
+    program on the controller is replaced, changed online, or kept; the IDE may stop a running
+    application when it downloads. Never pick it yourself. `delete_foreign_apps` deletes other
+    applications on the controller; leave it False unless the user asks."""
+    return call("login", timeout=300, app=app, change=change, delete_foreign_apps=delete_foreign_apps)
 
 
 @mcp.tool()
@@ -199,15 +203,15 @@ def write_var(app: str, values: dict[str, Any]) -> Any:
 # ---- trace
 
 @mcp.tool()
-def trace_setup(trace: str, variables: Optional[list[str]] = None, every_n_cycles: Optional[int] = None,
+def trace_setup(trace: str, samples: int, variables: Optional[list[str]] = None, every_n_cycles: Optional[int] = None,
                 resolution: Optional[str] = None, trigger_variable: Optional[str] = None,
-                trigger_edge: str = "Positive", trigger_level: Optional[float] = None,
-                post_trigger_samples: int = 100) -> Any:
+                trigger_edge: str = "Positive", trigger_level: Optional[float] = None) -> Any:
     """Configure an existing trace object (add it in the IDE first: Add Object > Trace; scripts cannot
-    create one). Variables are relative to the application, e.g. 'PRG_Main.bEnable'."""
+    create one). ALWAYS ask the user how many `samples` the trace should use before calling; never
+    pick a number yourself. Variables are relative to the application, e.g. 'PRG_Main.bEnable'."""
     return call("trace_setup", trace=trace, variables=variables, every_n_cycles=every_n_cycles,
                 resolution=resolution, trigger_variable=trigger_variable, trigger_edge=trigger_edge,
-                trigger_level=trigger_level, post_trigger_samples=post_trigger_samples)
+                trigger_level=trigger_level, samples=samples)
 
 
 @mcp.tool()

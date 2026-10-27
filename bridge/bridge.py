@@ -302,7 +302,8 @@ def h_messages(a):
 
 def h_login(a):
     oa = _online(a["app"])
-    oa.login(_enum(OnlineChangeOption, a.get("change", "Never")), bool(a.get("download", True)))
+    # the IDE's login(onlineChangeOption, bDeleteForeignApps): the IDE decides about the download itself
+    oa.login(_enum(OnlineChangeOption, a["change"]), bool(a.get("delete_foreign_apps", False)))
     return True
 
 
@@ -366,7 +367,8 @@ def h_trace_setup(a):
         t.trigger_edge = _enum(TriggerEdge, a.get("trigger_edge", "Positive"))
         if a.get("trigger_level") is not None:
             t.trigger_level = str(a["trigger_level"])
-        t.post_trigger_samples = int(a.get("post_trigger_samples", 100))
+    if a.get("samples"):
+        t.post_trigger_samples = int(a["samples"])
     return {"trace": a["trace"], "variables": [str(v.variable_name) for v in t.variable_list]}
 
 
@@ -374,7 +376,7 @@ def h_trace_run(a):
     """Log in if needed (no download), then download and start the trace."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
-        oa.login(OnlineChangeOption.Never, False)
+        oa.login(OnlineChangeOption.Never, False)   # attach only; trace_run never changes the program
     ed = _find(a["trace"]).open_editor()
     ed.download()
     ed.start()

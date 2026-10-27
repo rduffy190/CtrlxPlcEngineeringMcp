@@ -56,15 +56,22 @@ Object paths are `/`-separated names from the project root, for example
 `Device/Plc Logic/Application/PRG_Main`. Name matching is exact; check `get_tree` for the
 spelling (`Plc Logic` vs `PLC Logic`).
 
-`login` with `download=True` replaces the program on the controller and resets variables to
-their initial values. `write_var` and `plc_start` affect a running machine.
+## Rules for Claude
+
+- **Always ask the user how to download** before `login`. `change` (Never, Try, Force, Keep) is the
+  IDE's online-change option and is required; the IDE decides about the download itself and can
+  replace the program, reset variables to their initial values and stop a running application.
+  Do not choose it, and do not log in "just to look" at a running machine.
+- **Always ask the user how many samples the trace should use** before `trace_setup`; `samples` is
+  required and is not defaulted.
+- `write_var`, `plc_start`, `plc_stop` and `login` affect a running machine; confirm first.
 
 ### Tracing
 
 Scripts cannot create a trace object (`trace.create` returns a stub and adds nothing). Add one
 once in the IDE: right-click the Application > Add Object > Trace. After that:
 
-    trace_setup  trace="Device/Plc Logic/Application/MyTrace"  variables=["PRG_Main.bEnable", ...]
+    trace_setup  trace="Device/Plc Logic/Application/MyTrace"  samples=<ask the user>  variables=["PRG_Main.bEnable", ...]
     trace_run    app="Device/Plc Logic/Application"  trace=...
     ... do things (write_var, plc_start, ...) ...
     trace_save   trace=...      # stops, exports, returns the value changes per variable
