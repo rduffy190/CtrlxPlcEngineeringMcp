@@ -328,13 +328,31 @@ def h_plc_stop(a):
     return True
 
 
+def _online_fresh(app_path):
+    """Drop the cached online object and make a new one. The cached one goes stale when the
+    application is logged in or out in the IDE: reads then fail with 'Invalid variable reference'
+    and writes do nothing."""
+    _online_apps.pop(app_path, None)
+    return _online(app_path)
+
+
 def h_read_var(a):
-    oa = _online(a["app"])
-    return {n: str(oa.read_value(n)) for n in a["names"]}
+    def read(oa):
+        return {n: str(oa.read_value(n)) for n in a["names"]}
+    try:
+        return read(_online(a["app"]))
+    except Exception:
+        return read(_online_fresh(a["app"]))
 
 
 def h_write_var(a):
     oa = _online(a["app"])
+    first = next(iter(a["values"]))
+    try:
+        oa.read_value(first)        # probe: a stale object fails here instead of ignoring the write
+    except Exception:
+        oa = _online_fresh(a["app"])
+        oa.read_value(first)
     for n, v in a["values"].items():
         oa.set_prepared_value(n, str(v))
     oa.write_prepared_values()

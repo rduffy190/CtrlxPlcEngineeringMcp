@@ -96,6 +96,9 @@ These were found by trial; they explain the odd structure of `bridge/bridge.py`.
 - **`CTRLX_MCP_BLOCK=1`** serves on the script thread and never returns. Use it only for headless
   `--noUI` runs; the IDE window is frozen while it runs.
 - **Long calls** (download, build) block the IDE UI while they run.
+- **Stale online object.** The bridge caches one online object per application. After a login or
+  logout in the IDE it can go stale: reads fail with `Invalid variable reference` and writes do
+  nothing. `read_var` and `write_var` retry once with a fresh object.
 - **`build`** is `application.build()`, not a project method. Build messages come from
   `system.get_message_categories(True)`; do not call `system.clear_messages()` (it left the
   Messages pane broken). Compile problems can also surface only at `login`.

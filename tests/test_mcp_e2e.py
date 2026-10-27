@@ -161,6 +161,54 @@ def test_parse_csv():
     assert server.parse_csv("", 5)["changes"] == []
 
 
+def test_stale_online_object():
+    """A cached online object that went stale is replaced on a failed read or a failed write probe."""
+    class Stale(Online):
+        def read_value(self, n):
+            raise Exception("Internal error: Invalid variable reference")
+
+    class Fresh(Online):
+        written = []
+
+        def set_prepared_value(self, n, v):
+            Fresh.written.append((n, v))
+
+        def write_prepared_values(self):
+            pass
+
+    made = []
+
+    def create(a):
+        obj = Stale() if not made else Fresh()
+        made.append(obj)
+        return obj
+
+    old = builtins.online
+    builtins.online = types.SimpleNamespace(create_online_application=create)
+    bridge.online = builtins.online
+    bridge._online_apps.clear()
+    try:
+        assert bridge.h_read_var({"app": APP, "names": ["x"]}) == {"x": "42"}
+        assert len(made) == 2                       # stale one replaced once
+        bridge._online_apps.clear(); made.clear()
+        assert bridge.h_write_var({"app": APP, "values": {"x": 1}}) is True
+        assert Fresh.written == [("x", "1")] and len(made) == 2
+        class Always(Online):
+            def read_value(self, n):
+                raise Exception("Invalid variable reference")
+        bridge._online_apps.clear()
+        bridge.online = types.SimpleNamespace(create_online_application=lambda a: Always())
+        try:
+            bridge.h_read_var({"app": APP, "names": ["x"]})
+        except Exception as e:
+            assert "Invalid variable reference" in str(e)   # a real error still comes through
+        else:
+            raise AssertionError("expected the error")
+    finally:
+        builtins.online = bridge.online = old
+        bridge._online_apps.clear()
+
+
 def test_unreachable_bridge():
     import server
     server.PORT = 1  # nothing listens here
@@ -176,5 +224,6 @@ if __name__ == "__main__":
     threading.Thread(target=bridge.serve, daemon=True).start()
     time.sleep(0.5)
     test_parse_csv()
+    test_stale_online_object()
     test_unreachable_bridge()
     asyncio.run(run())
