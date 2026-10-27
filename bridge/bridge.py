@@ -377,7 +377,8 @@ def h_trace_setup(a):
 
 
 def h_trace_run(a):
-    """Log in if needed, then download and start the trace."""
+    """Log in if needed, then download and start the trace. The IDE asks the user to confirm the
+    trace download in a dialog; this call waits for that."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
         oa.login(OnlineChangeOption.Never, True)
@@ -420,7 +421,8 @@ def h_trace_wait(a):
 def h_trace_save(a):
     """Stop the trace, export CSV and return its text."""
     ed = _editor(a["trace"])
-    ed.stop()
+    if ed.is_running:       # a trace that filled its buffer has stopped itself
+        ed.stop()
     path = a.get("csv_path")
     tmp = None
     if not path:

@@ -76,8 +76,9 @@ once in the IDE: right-click the Application > Add Object > Trace. After that:
     trace_save   trace=...      # stops, exports, returns the value changes per variable
 
 `trace_setup` also puts the variables in the trace's first diagram; without that they are recorded
-but not drawn. Variable names are relative to the application: no `Application.` prefix. With the prefix the
-download silently does nothing. `trace_save` returns a table of the points where any value
+but not drawn. The IDE asks you to confirm the trace download in a dialog; `trace_run` waits until you accept it.
+Variable names are relative to the application: no `Application.` prefix. With the prefix the
+download silently does nothing. A trace stops itself once its buffer has filled; `trace_save` copes with that. It returns a table of the points where any value
 changed (`time_ms` plus one column per variable); sampling follows the task cycle.
 
 ## How the bridge works (and why)
