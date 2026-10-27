@@ -61,7 +61,9 @@ spelling (`Plc Logic` vs `PLC Logic`).
 - **Always ask the user how to download** before `login`. A download can replace the program,
   reset variables to their initial values and stop a running application. Do not decide it, and do
   not log in "just to look" at a running machine.
-- To attach to a running PLC use `login` with `change="Try"` (online change). The `download` flag is
+- **`change="Never"` stops a running controller when you log in** (seen on a ctrlX CORE). The default
+  is `Try` (online change), which keeps it running; it is also what `trace_run` uses.
+- To attach to a running PLC use `login` with `change="Try"`. The `download` flag is
   passed to the IDE as "delete foreign applications" on the controller, needs extra rights (a
   permissions error otherwise) and defaults to False; leave it off unless the user asks.
 - **Always ask the user how many samples the trace should use** before `trace_setup`; `samples` is

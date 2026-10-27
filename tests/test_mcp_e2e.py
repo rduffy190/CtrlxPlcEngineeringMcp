@@ -244,7 +244,7 @@ def test_trace_run_and_stop():
     trace_node.open_editor = lambda: ed
     app.add(trace_node)
     stubs = {"system": types.SimpleNamespace(delay=lambda ms: None),
-             "OnlineChangeOption": types.SimpleNamespace(Never="Never")}
+             "OnlineChangeOption": types.SimpleNamespace(Never="Never", Try="Try")}
     old = {k: bridge.__dict__[k] for k in stubs if k in bridge.__dict__}
     for k, v in stubs.items():
         setattr(bridge, k, v)

@@ -302,7 +302,7 @@ def h_messages(a):
 
 def h_login(a):
     oa = _online(a["app"])
-    oa.login(_enum(OnlineChangeOption, a.get("change", "Never")), bool(a.get("download", False)))
+    oa.login(_enum(OnlineChangeOption, a.get("change", "Try")), bool(a.get("download", False)))
     return True
 
 
@@ -407,7 +407,7 @@ def h_trace_run(a):
     With download=False the trace already on the controller is re-armed and started again."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
-        oa.login(OnlineChangeOption.Never, False)
+        oa.login(OnlineChangeOption.Try, False)   # Never would stop a running controller
     ed = _find(a["trace"]).open_editor()
     if a.get("download", True):
         ed.download()

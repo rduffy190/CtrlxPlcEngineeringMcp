@@ -155,13 +155,14 @@ def messages() -> Any:
 # ---- online
 
 @mcp.tool()
-def login(app: str, download: bool = False, change: str = "Never") -> Any:
+def login(app: str, download: bool = False, change: str = "Try") -> Any:
     """Log in to the application at path `app`. ALWAYS ask the user how to download before calling; a
     download can stop the application and reset its variables.
 
-    `change` is the IDE's online-change option: Never, Try (online change), Force or Keep. To attach
-    to a running application use change="Try". `download` is passed to the IDE as "delete foreign
-    applications" on the controller (needs extra rights); leave it False unless the user asks."""
+    `change` is the IDE's online-change option: Try (online change, the default), Force, Keep or
+    Never. Never STOPS a running controller when logging in; use Try to attach to a running
+    application. `download` is passed to the IDE as "delete foreign applications" on the controller
+    (needs extra rights); leave it False unless the user asks."""
     return call("login", timeout=300, app=app, download=download, change=change)
 
 
