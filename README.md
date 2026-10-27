@@ -49,7 +49,7 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`,
 `create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
 Online: `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
-Trace: `trace_setup`, `trace_run`, `trace_wait`, `trace_save`.
+Trace: `trace_setup`, `trace_run`, `trace_stop`, `trace_wait`, `trace_save`.
 Escape hatch: `exec_script` (runs IronPython in the IDE; use `dir()` to explore the API).
 
 Object paths are `/`-separated names from the project root, for example
@@ -74,13 +74,19 @@ Scripts cannot create a trace object (`trace.create` returns a stub and adds not
 once in the IDE: right-click the Application > Add Object > Trace. After that:
 
     trace_setup  trace="Device/Plc Logic/Application/MyTrace"  samples=<ask the user>  variables=["PRG_Main.bEnable", ...]
-    trace_run    app="Device/Plc Logic/Application"  trace=...
+    trace_run    app="Device/Plc Logic/Application"  trace=...     # downloads and starts
     ... do things (write_var, plc_start, ...) ...
-    trace_save   trace=...      # stops, exports, returns the value changes per variable
+    trace_save   trace=...      # stops if needed, exports, returns the value changes per variable
+
+Repeat runs of the same trace: `trace_run ... download=False` re-arms the trigger and starts the
+trace already on the controller, with no download. `trace_stop` stops it early. Download again
+whenever the trace's variables or settings change.
+
+**On download the IDE shows a dialog that the user may have to acknowledge** (the trace is sent to
+the controller). `trace_run` waits for it, so tell the user to watch the IDE.
 
 `trace_setup` also puts the variables in the trace's first diagram; without that they are recorded
-but not drawn. The IDE asks you to confirm the trace download in a dialog; `trace_run` waits until you accept it.
-Variable names are relative to the application: no `Application.` prefix. With the prefix the
+but not drawn. Variable names are relative to the application: no `Application.` prefix. With the prefix the
 download silently does nothing. A trace stops itself once its buffer has filled; `trace_save` copes with that. It returns a table of the points where any value
 changed (`time_ms` plus one column per variable); sampling follows the task cycle.
 

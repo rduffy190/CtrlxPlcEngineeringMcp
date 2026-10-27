@@ -216,9 +216,18 @@ def trace_setup(trace: str, samples: int, variables: Optional[list[str]] = None,
 
 
 @mcp.tool()
-def trace_run(app: str, trace: str) -> Any:
-    """Download and start the trace at path `trace` (logs in without download if needed)."""
-    return call("trace_run", timeout=300, app=app, trace=trace)
+def trace_run(app: str, trace: str, download: bool = True) -> Any:
+    """Start the trace at path `trace` (logs in without download if needed). With download=True the
+    trace is downloaded first; the IDE may ask the user to acknowledge that in a dialog, so tell the
+    user and wait. With download=False the trace already on the controller is re-armed and started
+    again (use it for repeat runs when its variables and settings have not changed)."""
+    return call("trace_run", timeout=600, app=app, trace=trace, download=download)
+
+
+@mcp.tool()
+def trace_stop(trace: str) -> Any:
+    """Stop the trace if it is still running (it stops itself when its buffer is full)."""
+    return call("trace_stop", trace=trace)
 
 
 @mcp.tool()

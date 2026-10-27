@@ -112,7 +112,7 @@ async def run():
         expected = {"ping", "open_project", "save_project", "get_tree", "get_pou", "set_pou",
                     "create_pou", "create_dut", "create_gvl", "delete_object", "build",
                     "messages", "login", "logout", "run_state", "plc_start", "plc_stop",
-                    "read_var", "write_var", "trace_setup", "trace_run", "trace_wait",
+                    "read_var", "write_var", "trace_setup", "trace_run", "trace_stop", "trace_wait",
                     "trace_save", "exec_script"}
         assert expected <= tools, f"missing tools: {expected - tools}"
 
@@ -209,6 +209,69 @@ def test_stale_online_object():
         bridge._online_apps.clear()
 
 
+def test_trace_run_and_stop():
+    """trace_run downloads by default; download=False re-arms the trigger and starts without it."""
+    calls = []
+
+    class Editor:
+        trig = "TriggerReached"
+        is_running = False
+        is_logged_in = True
+
+        def download(self):
+            calls.append("download")
+
+        def reset_trigger(self):
+            calls.append("reset")
+            Editor.trig = "WaitForTrigger"
+
+        def get_trigger_state(self):
+            return Editor.trig
+
+        def get_packet_state(self):
+            return "Started" if Editor.is_running else "Stopped"
+
+        def start(self):
+            calls.append("start")
+            Editor.is_running = True
+
+        def stop(self):
+            calls.append("stop")
+            Editor.is_running = False
+
+    ed = Editor()
+    trace_node = Node("Tr", text=False)
+    trace_node.open_editor = lambda: ed
+    app.add(trace_node)
+    stubs = {"system": types.SimpleNamespace(delay=lambda ms: None),
+             "OnlineChangeOption": types.SimpleNamespace(Never="Never")}
+    old = {k: bridge.__dict__[k] for k in stubs if k in bridge.__dict__}
+    for k, v in stubs.items():
+        setattr(bridge, k, v)
+    bridge._online_apps.clear()
+    try:
+        path = APP + "/Tr"
+        assert bridge.h_trace_run({"app": APP, "trace": path}) is True
+        assert calls == ["download", "start"]
+        assert bridge.h_trace_stop({"trace": path}) == {"running": False, "state": "Stopped"}
+        calls.clear()
+        assert bridge.h_trace_run({"app": APP, "trace": path, "download": False}) is True
+        assert calls == ["reset", "start"]          # no download
+        calls.clear()
+        assert bridge.h_trace_stop({"trace": path})["running"] is False and calls == ["stop"]
+        calls.clear()
+        bridge.h_trace_stop({"trace": path})        # already stopped: no second stop
+        assert calls == []
+    finally:
+        for k in stubs:      # drop the stubs again so the builtins ones show through
+            if k in old:
+                setattr(bridge, k, old[k])
+            else:
+                delattr(bridge, k)
+        trace_node.remove()
+        bridge._online_apps.clear()
+
+
 def test_unreachable_bridge():
     import server
     server.PORT = 1  # nothing listens here
@@ -225,5 +288,6 @@ if __name__ == "__main__":
     time.sleep(0.5)
     test_parse_csv()
     test_stale_online_object()
+    test_trace_run_and_stop()
     test_unreachable_bridge()
     asyncio.run(run())

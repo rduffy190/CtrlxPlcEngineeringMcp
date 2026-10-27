@@ -394,22 +394,42 @@ def h_trace_setup(a):
     return {"trace": a["trace"], "variables": [str(v.variable_name) for v in t.variable_list]}
 
 
+def _wait(cond, seconds):
+    deadline = time.time() + seconds
+    while not cond() and time.time() < deadline:
+        system.delay(100)
+    return cond()
+
+
 def h_trace_run(a):
-    """Log in if needed, then download and start the trace. The IDE asks the user to confirm the
-    trace download in a dialog; this call waits for that."""
+    """Log in if needed, then start the trace. With download (the default) the trace is downloaded
+    first; the IDE may ask the user to acknowledge that in a dialog and this call waits for it.
+    With download=False the trace already on the controller is re-armed and started again."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
         oa.login(OnlineChangeOption.Never, False)
     ed = _find(a["trace"]).open_editor()
-    ed.download()
+    if a.get("download", True):
+        ed.download()
+    else:
+        # a finished trace cannot start until its trigger is re-armed (takes a moment)
+        ed.reset_trigger()
+        _wait(lambda: str(ed.get_trigger_state()) != "TriggerReached", 5)
     ed.start()
     _editors[a["trace"]] = ed
-    deadline = time.time() + 5
-    while not ed.is_running and time.time() < deadline:
-        system.delay(100)
-    if not ed.is_running:
-        raise RuntimeError("trace did not start (editor logged in: %s)" % ed.is_logged_in)
+    if not _wait(lambda: ed.is_running, 5):
+        raise RuntimeError("trace did not start (editor logged in: %s, trigger: %s)"
+                           % (ed.is_logged_in, ed.get_trigger_state()))
     return True
+
+
+def h_trace_stop(a):
+    """Stop the trace if it is running (a full trace has stopped itself)."""
+    ed = _editor(a["trace"])
+    if ed.is_running:
+        ed.stop()
+        _wait(lambda: not ed.is_running, 5)
+    return {"running": bool(ed.is_running), "state": str(ed.get_packet_state())}
 
 
 def _editor(path):
