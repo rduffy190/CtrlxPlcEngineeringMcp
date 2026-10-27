@@ -76,7 +76,8 @@ once in the IDE: right-click the Application > Add Object > Trace. After that:
     ... do things (write_var, plc_start, ...) ...
     trace_save   trace=...      # stops, exports, returns the value changes per variable
 
-Variable names are relative to the application: no `Application.` prefix. With the prefix the
+`trace_setup` also puts the variables in the trace's first diagram; without that they are recorded
+but not drawn. Variable names are relative to the application: no `Application.` prefix. With the prefix the
 download silently does nothing. `trace_save` returns a table of the points where any value
 changed (`time_ms` plus one column per variable); sampling follows the task cycle.
 

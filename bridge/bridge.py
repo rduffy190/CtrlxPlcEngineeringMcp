@@ -357,6 +357,11 @@ def h_trace_setup(a):
             if v.startswith("Application."):
                 v = v[len("Application."):]
             t.add_trace_variable(v)
+        # variables in the record list are not drawn until they are in a diagram
+        diagrams = list(t.diagrams)
+        d = diagrams[0] if diagrams else t.diagrams.add()
+        for v in t.variable_list:
+            d.add_diagram_variable(v, True)
     if a.get("every_n_cycles"):
         t.every_n_cycles = int(a["every_n_cycles"])
     if a.get("resolution"):
