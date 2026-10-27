@@ -302,7 +302,7 @@ def h_messages(a):
 
 def h_login(a):
     oa = _online(a["app"])
-    oa.login(_enum(OnlineChangeOption, a.get("change", "Never")), bool(a.get("download", True)))
+    oa.login(_enum(OnlineChangeOption, a.get("change", "Never")), bool(a.get("download", False)))
     return True
 
 
@@ -399,7 +399,7 @@ def h_trace_run(a):
     trace download in a dialog; this call waits for that."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
-        oa.login(OnlineChangeOption.Never, True)
+        oa.login(OnlineChangeOption.Never, False)
     ed = _find(a["trace"]).open_editor()
     ed.download()
     ed.start()
