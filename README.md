@@ -58,10 +58,9 @@ spelling (`Plc Logic` vs `PLC Logic`).
 
 ## Rules for Claude
 
-- **Always ask the user how to download** before `login`. `change` (Never, Try, Force, Keep) is the
-  IDE's online-change option and is required; the IDE decides about the download itself and can
-  replace the program, reset variables to their initial values and stop a running application.
-  Do not choose it, and do not log in "just to look" at a running machine.
+- **Always ask the user how to download** before `login`. A download can replace the program,
+  reset variables to their initial values and stop a running application. Do not decide it, and do
+  not log in "just to look" at a running machine.
 - **Always ask the user how many samples the trace should use** before `trace_setup`; `samples` is
   required and is not defaulted.
 - `write_var`, `plc_start`, `plc_stop` and `login` affect a running machine; confirm first.

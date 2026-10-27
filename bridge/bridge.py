@@ -302,8 +302,7 @@ def h_messages(a):
 
 def h_login(a):
     oa = _online(a["app"])
-    # the IDE's login(onlineChangeOption, bDeleteForeignApps): the IDE decides about the download itself
-    oa.login(_enum(OnlineChangeOption, a["change"]), bool(a.get("delete_foreign_apps", False)))
+    oa.login(_enum(OnlineChangeOption, a.get("change", "Never")), bool(a.get("download", True)))
     return True
 
 
@@ -378,10 +377,10 @@ def h_trace_setup(a):
 
 
 def h_trace_run(a):
-    """Log in if needed (no download), then download and start the trace."""
+    """Log in if needed, then download and start the trace."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
-        oa.login(OnlineChangeOption.Never, False)   # attach only; trace_run never changes the program
+        oa.login(OnlineChangeOption.Never, True)
     ed = _find(a["trace"]).open_editor()
     ed.download()
     ed.start()

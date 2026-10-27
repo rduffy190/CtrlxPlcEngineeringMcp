@@ -155,13 +155,10 @@ def messages() -> Any:
 # ---- online
 
 @mcp.tool()
-def login(app: str, change: str, delete_foreign_apps: bool = False) -> Any:
-    """Log in to the application at path `app`. ALWAYS ask the user how to download before calling:
-    `change` is the IDE's online-change option (Never, Try, Force or Keep) and decides whether the
-    program on the controller is replaced, changed online, or kept; the IDE may stop a running
-    application when it downloads. Never pick it yourself. `delete_foreign_apps` deletes other
-    applications on the controller; leave it False unless the user asks."""
-    return call("login", timeout=300, app=app, change=change, delete_foreign_apps=delete_foreign_apps)
+def login(app: str, download: bool = True, change: str = "Never") -> Any:
+    """Log in to the application at path `app` (optionally downloading). ALWAYS ask the user how to
+    download before calling; a download can stop the application and reset its variables."""
+    return call("login", timeout=300, app=app, download=download, change=change)
 
 
 @mcp.tool()
