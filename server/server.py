@@ -156,8 +156,9 @@ def messages() -> Any:
 
 @mcp.tool()
 def login(app: str, download: bool = False, change: str = "Try") -> Any:
-    """Log in to the application at path `app`. ALWAYS ask the user how to download before calling; a
-    download can stop the application and reset its variables.
+    """Log in to the application at path `app`. ALWAYS ask the user how to download the application before
+    calling; an application download can stop it and reset its variables (a trace download is separate
+    and harmless, see trace_run).
 
     `change` is the IDE's online-change option: Try (online change, the default), Force, Keep or
     Never. Never STOPS a running controller when logging in; use Try to attach to a running
@@ -218,10 +219,12 @@ def trace_setup(trace: str, samples: int, variables: Optional[list[str]] = None,
 
 @mcp.tool()
 def trace_run(app: str, trace: str, download: bool = True) -> Any:
-    """Start the trace at path `trace` (logs in without download if needed). With download=True the
-    trace is downloaded first; the IDE may ask the user to acknowledge that in a dialog, so tell the
-    user and wait. With download=False the trace already on the controller is re-armed and started
-    again (use it for repeat runs when its variables and settings have not changed)."""
+    """Start the trace at path `trace` (logs in with online change if needed). The trace download is
+    NOT an application download: with download=True only the trace configuration is sent to the
+    controller; the PLC program is untouched and the controller is not stopped. The IDE may ask the
+    user to acknowledge that trace download in a dialog, so tell the user and wait. With
+    download=False the trace already on the controller is re-armed and started again (use it for
+    repeat runs when the trace's variables and settings have not changed)."""
     return call("trace_run", timeout=600, app=app, trace=trace, download=download)
 
 

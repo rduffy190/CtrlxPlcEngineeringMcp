@@ -58,8 +58,9 @@ spelling (`Plc Logic` vs `PLC Logic`).
 
 ## Rules for Claude
 
-- **Always ask the user how to download** before `login`. A download can replace the program,
-  reset variables to their initial values and stop a running application. Do not decide it, and do
+- **Always ask the user how to download the application** before `login`. An application download
+  can replace the program, reset variables to their initial values and stop a running application.
+  (A *trace* download is a different thing, see Tracing.) Do not decide it, and do
   not log in "just to look" at a running machine.
 - **`change="Never"` stops a running controller when you log in** (seen on a ctrlX CORE). The default
   is `Try` (online change), which keeps it running; it is also what `trace_run` uses.
@@ -84,8 +85,10 @@ Repeat runs of the same trace: `trace_run ... download=False` re-arms the trigge
 trace already on the controller, with no download. `trace_stop` stops it early. Download again
 whenever the trace's variables or settings change.
 
-**On download the IDE shows a dialog that the user may have to acknowledge** (the trace is sent to
-the controller). `trace_run` waits for it, so tell the user to watch the IDE.
+**The trace download is not an application download.** It sends only the trace configuration to the
+controller; the PLC program is untouched and the controller keeps running. On trace download the IDE
+shows a dialog that the user may have to acknowledge. `trace_run` waits for it, so tell the user to
+watch the IDE.
 
 `trace_setup` also puts the variables in the trace's first diagram; without that they are recorded
 but not drawn. Variable names are relative to the application: no `Application.` prefix. With the prefix the

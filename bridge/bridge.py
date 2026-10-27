@@ -402,8 +402,9 @@ def _wait(cond, seconds):
 
 
 def h_trace_run(a):
-    """Log in if needed, then start the trace. With download (the default) the trace is downloaded
-    first; the IDE may ask the user to acknowledge that in a dialog and this call waits for it.
+    """Log in if needed, then start the trace. With download (the default) the trace configuration
+    is sent to the controller first (not the application program: the PLC is not touched); the IDE
+    may ask the user to acknowledge that in a dialog and this call waits for it.
     With download=False the trace already on the controller is re-armed and started again."""
     oa = _online(a["app"])
     if not oa.is_logged_in:
