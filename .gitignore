@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.ctrlx_token
+.claude/
+dist/
+scripts/config.bat
+broker/
