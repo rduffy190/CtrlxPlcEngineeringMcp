@@ -47,9 +47,49 @@ class BridgeError(RuntimeError):
     pass
 
 
+class BridgeUnreachable(BridgeError):
+    pass
+
+
+# On Windows with the bridge on this PC, a call that finds no bridge starts scripts\start_bridge.bat
+# (the IDE with the bridge loaded) and waits for it. CTRLX_AUTOSTART=0 turns this off.
+AUTOSTART = os.environ.get("CTRLX_AUTOSTART", "1") == "1" and os.name == "nt" and HOST in ("127.0.0.1", "localhost")
+_autostart_tried = 0.0
+
+
+def _autostart() -> bool:
+    """Start the IDE with the bridge and wait until it answers. At most one attempt per 5 minutes."""
+    import time
+    global _autostart_tried
+    bat = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "start_bridge.bat")
+    if not AUTOSTART or not os.path.exists(bat) or time.time() - _autostart_tried < 300:
+        return False
+    _autostart_tried = time.time()
+    # stdin from NUL so the script's closing `pause` returns at once.
+    subprocess.Popen(["cmd.exe", "/c", bat], cwd=os.path.dirname(bat), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            _rpc(PORT, "ping", 30, {})
+            return True
+        except BridgeUnreachable:
+            continue
+        except BridgeError:
+            return True  # it answers, even if with an error
+    return False
+
+
 def call(cmd: str, timeout: float = 60, **args: Any) -> Any:
     """One request/response round trip to the bridge."""
-    return _rpc(PORT, cmd, timeout, args)
+    try:
+        return _rpc(PORT, cmd, timeout, args)
+    except BridgeUnreachable:
+        if not _autostart():
+            raise
+        return _rpc(PORT, cmd, timeout, args)
 
 
 def _rpc(port: int, cmd: str, timeout: float, args: dict) -> Any:
@@ -65,7 +105,7 @@ def _rpc(port: int, cmd: str, timeout: float, args: dict) -> Any:
                     break
                 buf += chunk
     except OSError as e:
-        raise BridgeError(f"bridge unreachable at {HOST}:{port}: {e}") from e
+        raise BridgeUnreachable(f"bridge unreachable at {HOST}:{port}: {e}") from e
     resp = json.loads(buf)
     if not resp.get("ok"):
         raise BridgeError(resp.get("error", "unknown error") + "\n" + resp.get("traceback", ""))
@@ -326,6 +366,22 @@ def create_dut(parent: str, name: str) -> Any:
 def create_gvl(parent: str, name: str) -> Any:
     """Create a global variable list under parent."""
     return call("create_gvl", parent=parent, name=name)
+
+
+@mcp.tool()
+def create_folder(parent: str, name: str) -> Any:
+    """Create a folder under parent. name may be a path such as '02_Gapper/POUs': every missing level is created,
+    existing ones are reused (safe to repeat). Folders only group objects in the tree: names and code are unchanged.
+    The application should be logged out. Returns the full path and which levels were created."""
+    return call("create_folder", parent=parent, name=name)
+
+
+@mcp.tool()
+def move_object(path: str, dest: str) -> Any:
+    """Move an object (POU, DUT, GVL or folder) into the folder dest, e.g. path 'Device/Plc Logic/Application/FB_Pump',
+    dest 'Device/Plc Logic/Application/02_Gapper/POUs'. The name stays the same, so code, task calls and
+    references keep working. The application must be logged out (objects cannot be moved while online)."""
+    return call("move_object", path=path, dest=dest)
 
 
 @mcp.tool()

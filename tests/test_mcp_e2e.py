@@ -62,6 +62,13 @@ class Node:
         with open(path, "wb") as f:
             f.write(b"\xef\xbb\xbf<project>" + ",".join(o.get_name() for o in objs).encode() + b"</project>")
 
+    def create_folder(self, name):             # like the real call: returns nothing
+        self.add(Node(name, text=False))
+
+    def move(self, dest):
+        self.parent._children.remove(self)
+        dest.add(self)
+
     def create_dut(self, name):
         return self.add(Node(name))
 
@@ -151,7 +158,7 @@ async def run():
         tools = {t.name for t in (await s.list_tools()).tools}
         expected = {"ping", "open_project", "save_project", "get_tree", "get_pou", "set_pou",
                     "create_pou", "export_plcopen", "import_plcopen", "ladder_check", "ladder_import",
-                    "ladder_export", "create_dut", "create_gvl", "delete_object", "build",
+                    "ladder_export", "create_dut", "create_gvl", "create_folder", "move_object", "delete_object", "build",
                     "messages", "login", "logout", "run_state", "plc_start", "plc_stop",
                     "read_var", "write_var", "trace_setup", "trace_run", "trace_stop", "trace_wait",
                     "trace_save", "exec_script"}
@@ -208,6 +215,18 @@ async def run():
         await tool("delete_object", path=f"{APP}/GVL")
         names = [c.get_name() for c in app.get_children(False)]
         assert names == ["PLC_PRG", "Motor", "ST_Axis"], names
+
+        # folders: a path creates every missing level, a repeat reuses them, objects move without a rename
+        f = data(await tool("create_folder", parent=APP, name="02_Gapper/POUs"))
+        assert f == {"path": f"{APP}/02_Gapper/POUs", "created": ["02_Gapper", "POUs"]}, f
+        f = data(await tool("create_folder", parent=APP, name="02_Gapper/Types"))
+        assert f["created"] == ["Types"], f
+        m = data(await tool("move_object", path=f"{APP}/Motor", dest=f"{APP}/02_Gapper/POUs"))
+        assert m == {"path": f"{APP}/02_Gapper/POUs/Motor"}, m
+        names = [c.get_name() for c in app.get_children(False)]
+        assert names == ["PLC_PRG", "ST_Axis", "02_Gapper"], names
+        tree = data(await tool("get_tree", path=f"{APP}/02_Gapper", depth=3))
+        assert [t["name"] for t in tree] == ["POUs", "Types"] and tree[0]["children"][0]["name"] == "Motor", tree
 
         b = data(await tool("build", app=APP))
         assert b["errors"] == 1 and "type mismatch" in b["messages"][0]["text"]

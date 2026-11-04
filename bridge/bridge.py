@@ -428,6 +428,40 @@ def h_delete(a):
     return True
 
 
+def h_create_folder(a):
+    """Create a folder under parent. name may be a path ('02_Gapper/POUs'): every missing level is created.
+    Existing folders are reused, so the call can be repeated. Returns the full path of the last folder."""
+    node = _find(a["parent"])
+    path = a["parent"].strip("/")
+    created = []
+    for part in [p for p in a["name"].split("/") if p]:
+        nxt = None
+        for child in node.get_children(False):
+            if child.get_name() == part:
+                nxt = child
+                break
+        if nxt is None:
+            node.create_folder(part)           # the scripting call returns nothing: look the folder up again
+            for child in node.get_children(False):
+                if child.get_name() == part:
+                    nxt = child
+                    break
+            if nxt is None:
+                raise ValueError("could not create folder '%s' under '%s'" % (part, node.get_name()))
+            created.append(part)
+        node = nxt
+        path += "/" + part
+    return {"path": path, "created": created}
+
+
+def h_move_object(a):
+    """Move an object (POU, DUT, GVL or folder) into the folder dest. Names do not change."""
+    obj = _find(a["path"])
+    dest = _find(a["dest"])
+    obj.move(dest)
+    return {"path": a["dest"].strip("/") + "/" + obj.get_name()}
+
+
 def h_build(a):
     # build() lives on the application object, not the project
     if a.get("app"):

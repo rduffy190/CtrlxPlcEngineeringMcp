@@ -28,8 +28,20 @@ class Node:
     def get_children(self, recursive):
         return self._children
 
+    def create_folder(self, name):          # like the real scripting call: returns nothing
+        self._children.append(Node(name))
+        self._children[-1].parent = self
+
+    def move(self, dest):
+        self.parent._children.remove(self)
+        dest._children.append(self)
+        self.parent = dest
+
 
 app = Node("Application", [Node("GVL")])
+app.parent = None
+for _c in app._children:
+    _c.parent = app
 proj = Node("proj", [Node("Device", [Node("PLC Logic", [app])])])
 proj.path = "/x.project"
 for name, val in dict(projects=types.SimpleNamespace(primary=proj), online=None,
@@ -59,6 +71,16 @@ def main():
     assert not r["ok"] and "not found" in r["error"]
     r = rpc("exec", code="print('hi')\nresult = 1 + 1")["result"]
     assert r == {"stdout": "hi\n", "result": 2}
+    # folders: a path creates every missing level, repeats are safe, objects move without a rename
+    base = "Device/PLC Logic/Application"
+    r = rpc("create_folder", parent=base, name="02_Gapper/POUs")["result"]
+    assert r == {"path": base + "/02_Gapper/POUs", "created": ["02_Gapper", "POUs"]}, r
+    assert rpc("create_folder", parent=base, name="02_Gapper/POUs")["result"]["created"] == []
+    r = rpc("move_object", path=base + "/GVL", dest=base + "/02_Gapper/POUs")["result"]
+    assert r == {"path": base + "/02_Gapper/POUs/GVL"}, r
+    tree = rpc("get_tree", path=base, depth=3)["result"]
+    assert [n["name"] for n in tree] == ["02_Gapper"] and tree[0]["children"][0]["children"][0]["name"] == "GVL", tree
+    assert not rpc("move_object", path=base + "/Missing", dest=base)["ok"]
     print("ok")
 
 

@@ -62,7 +62,8 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 ## Tools
 
 Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`, `list_io`, `map_io`,
-`create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
+`create_dut`, `create_gvl`, `create_folder`, `move_object`, `delete_object`, `build`, `messages`.
+`create_folder` (a path such as `02_Gapper/POUs` creates every missing level, repeats are safe) and `move_object` group objects into folders; names do not change, so code and task calls keep working. The application must be logged out.
 HMI: `build_hmi` (screen definition to `.export`, plus SVG previews), `import_visu` (a visugen `.export` into the open project),
 `add_web_visu` (web visualization that starts on a visu), `publish_hmi` (build, import, web visu and save in one call; needs the ctrlx-hmi skill).
 
@@ -196,7 +197,7 @@ These do not run against a real IDE. What has been run for real: ping, tree, POU
 save_project, build, login with download, logout, run_state, plc_start, read_var, write_var, and
 the trace flow above, and PLCopenXML export/import (`export_xml`, and `import_xml` with text written
 to a temp file) including a ladder block, driven through `exec_script`. Not exercised yet: the
-`export_plcopen`, `import_plcopen` and `ladder_*` tools end to end, `create_pou`/`create_dut`/`create_gvl`/`delete_object`,
+`export_plcopen`, `import_plcopen` and `ladder_*` tools end to end, `create_pou`/`create_dut`/`create_gvl`/`delete_object`, `create_folder`/`move_object` against the stubs only (the same scripting calls, `create_folder` and `move`, were run for real through `exec_script`),
 `plc_stop`, trigger-based traces, and starting the bridge with `--runscript` at IDE startup
 (`AUTORUN=1`; the menu route is what has been tested).
 
@@ -215,3 +216,10 @@ fills `server/templates/webvisu.template.native` (a real export of a WebVisualiz
 size (1920x1080 by default). The scripting engine has no call to create visualizations. The bridge log of a helper
 is `%TEMP%\ctrlx_bridge_<port>.log`; `start_bridge.bat` also takes `BRIDGE_PORT`, `BRIDGE_PROJECT` and
 `BRIDGE_HEADLESS=1` for a second instance by hand.
+
+## Auto-start
+
+On Windows, when the bridge is on this PC and a tool call finds nothing listening, the server runs
+`scripts\start_bridge.bat` itself (IDE plus bridge, and the project from `config.bat`) and waits up to three
+minutes for it, so the first call after boot takes about a minute. It tries once per five minutes.
+`CTRLX_AUTOSTART=0` turns it off.
