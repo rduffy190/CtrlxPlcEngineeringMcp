@@ -22,6 +22,10 @@ set "AUTORUN=1"
 set "TOKEN_FILE=%HERE%.ctrlx_token"
 if exist "%HERE%config.bat" call "%HERE%config.bat"
 rem --------------------------------------------------------------------------------------------
+rem Newer installs live under "ctrlX WORKS\ctrlX PLC Engineering\<version>\Studio\Common".
+if not exist "%IDE_EXE%" for /d %%D in ("C:\Program Files\ctrlX WORKS\ctrlX PLC Engineering\*") do (
+    if exist "%%D\Studio\Common\ctrlX-PLC-Engineering.exe" set "IDE_EXE=%%D\Studio\Common\ctrlX-PLC-Engineering.exe"
+)
 
 set "BRIDGE=%HERE%..\bridge\bridge.py"
 

@@ -1,6 +1,7 @@
 """MCP server for ctrlX PLC Engineering. Proxies tool calls to bridge/bridge.py.
 
-Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required),
+Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required unless
+a .ctrlx_token file exists in the project root or scripts/, which is how Windows is set up),
 CTRLX_SKILLS_DIR (~/.claude/skills; holds ctrlx-engineer and codesys-lad, used by the ladder tools).
 """
 import csv
@@ -18,7 +19,25 @@ from mcp.server.fastmcp import FastMCP
 
 HOST = os.environ.get("CTRLX_BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CTRLX_BRIDGE_PORT", "8765"))
-TOKEN = os.environ.get("CTRLX_MCP_TOKEN", "")
+
+
+def _load_token() -> str:
+    tok = os.environ.get("CTRLX_MCP_TOKEN", "").strip()
+    if tok and not tok.startswith("${"):  # an unexpanded ${VAR} from .mcp.json is not a token
+        return tok
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.path.join(root, ".ctrlx_token"), os.path.join(root, "scripts", ".ctrlx_token")):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                tok = f.read().strip()
+        except OSError:
+            continue
+        if tok:
+            return tok
+    return ""
+
+
+TOKEN = _load_token()
 SKILLS = os.environ.get("CTRLX_SKILLS_DIR", os.path.expanduser("~/.claude/skills"))
 
 mcp = FastMCP("ctrlx-engineering")
@@ -165,7 +184,12 @@ def _skill_script(skill: str, script: str) -> str:
 
 
 def _run_script(args: list[str], timeout: float = 120) -> tuple[int, str]:
-    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout)
+    # The skills may be symlinks: ctrlx-engineer then resolves to its real folder and cannot find
+    # codesys-lad next to it. Put the ladder compiler on the path explicitly.
+    env = dict(os.environ)
+    lad = os.path.join(SKILLS, "codesys-lad", "scripts")
+    env["PYTHONPATH"] = lad + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout, env=env)
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
@@ -249,6 +273,23 @@ def ladder_export(paths: list[str], include_xml: bool = False) -> dict:
     if include_xml:
         r["xml"] = xml
     return r
+
+
+@mcp.tool()
+def add_task_call(program: str, task: str = "Device/Plc Logic/Application/Task Configuration/MainTask") -> Any:
+    """Make a task call a program (a PRG in the application), so the program actually runs.
+    A program that no task calls never executes. Does nothing if the task already calls it.
+    The scripting engine has no call for this, so the bridge re-imports the task: the IDE may
+    show a dialog that the user must acknowledge (this call waits for it, up to 5 minutes), so
+    tell the user to watch the IDE. The application should be logged out."""
+    return call("add_task_call", timeout=300, task=task, program=program)
+
+
+@mcp.tool()
+def remove_task_call(program: str, task: str = "Device/Plc Logic/Application/Task Configuration/MainTask") -> Any:
+    """Stop a task calling a program (the program itself stays). No dialog. Do this before
+    deleting a program that a task calls."""
+    return call("remove_task_call", task=task, program=program)
 
 
 @mcp.tool()
@@ -387,5 +428,5 @@ def exec_script(code: str) -> Any:
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise SystemExit("CTRLX_MCP_TOKEN must be set")
+        raise SystemExit("CTRLX_MCP_TOKEN must be set, or put the token in .ctrlx_token (project root or scripts/)")
     mcp.run()

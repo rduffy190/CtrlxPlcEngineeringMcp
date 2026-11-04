@@ -11,9 +11,24 @@ Claude Code --stdio--> server/server.py (CPython, FastMCP)
    PLC Engineering (Windows) running bridge/bridge.py (IronPython 2.7, inside the IDE)
 ```
 
-Tested with ctrlX PLC Engineering 4.6.2 (ScriptEngine 4.2.0.0) against a ctrlX CORE.
+Tested with ctrlX PLC Engineering 4.6.2 on Linux+Windows split setup (against a ctrlX CORE), and 4.6.1
+(ScriptEngine 4.2.0.0) with everything on one Windows PC.
 
 ## Setup
+
+**Everything on one Windows PC (Claude Code and PLC Engineering together)**
+
+    scripts\install_windows.bat
+
+It creates `.venv`, installs the requirements, creates `scripts\.ctrlx_token`, writes
+`scripts\config.bat` with `TUNNEL=0`, and registers the server with `claude mcp add` (local scope,
+so it overrides the Linux-style `.mcp.json` in this folder). The server reads the token from the
+file when `CTRLX_MCP_TOKEN` is not set. Then run `scripts\start_bridge.bat`, start Claude Code in
+this folder and ask it to `ping`. No SSH or tunnel is involved: the server talks to the bridge on
+127.0.0.1:8765 directly. The ladder tools need the skills in `%USERPROFILE%\.claude\skills`
+(or `CTRLX_SKILLS_DIR`).
+
+**Split setup (Claude Code on Linux/WSL, PLC Engineering on Windows)**
 
 **Linux / WSL (where Claude Code runs)**
 
@@ -46,7 +61,7 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 
 ## Tools
 
-Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`,
+Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`,
 `create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
 PLCopenXML: `export_plcopen`, `import_plcopen`. Ladder: `ladder_check`, `ladder_import`, `ladder_export`.
 Online: `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
@@ -71,6 +86,8 @@ spelling (`Plc Logic` vs `PLC Logic`).
 - **Always ask the user how many samples the trace should use** before `trace_setup`; `samples` is
   required and is not defaulted.
 - `write_var`, `plc_start`, `plc_stop` and `login` affect a running machine; confirm first.
+- **A program only runs if a task calls it.** After importing or creating a `PRG_`, use `add_task_call`
+  (default task `MainTask`). The IDE may show a dialog while the task is re-imported; tell the user to watch it.
 
 ### Tracing
 
@@ -150,6 +167,18 @@ These were found by trial; they explain the odd structure of `bridge/bridge.py`.
   `system.get_message_categories(True)`; do not call `system.clear_messages()` (it left the
   Messages pane broken). Compile problems can also surface only at `login`.
 - Do not force-kill the IDE after a hung call; close it normally.
+- **Task calls.** The scripting engine has no call to add a program to a task. `add_task_call` exports the
+  task (`export_native`), adds an entry to its `PouList` and re-imports it; the IDE asks the user to allow the
+  task import. `remove_task_call` removes the child call object directly (no dialog).
+- **Non-ASCII text.** IronPython's json encoder fails on a non-ASCII `str` (it tries to UTF-8-decode text that
+  is already decoded), which lost the reply and timed out the client. `_jsonable` hands it UTF-8 bytes.
+
+## Example
+
+`examples/intersection/` is a four-way intersection in ladder (fixed-time NS/EW cycle, fault input
+with flashing red, reset), written to test the ladder tools. Build and simulate it with the
+ladder skills (`st_to_plcopenxml.py`, then `test_intersection.py`), import it with `ladder_import`,
+then `add_task_call` for `PRG_Intersection` so a task runs it.
 
 ## Tests
 

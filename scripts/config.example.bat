@@ -10,6 +10,7 @@ rem 0 = no tunnel (Claude Code runs on this machine or you tunnel some other way
 set "TUNNEL=1"
 
 rem ctrlX PLC Engineering executable.
+rem Found automatically for ctrlX WORKS installs (...\ctrlX WORKS\ctrlX PLC Engineering.6.1\Studio\Common\ctrlX-PLC-Engineering.exe).
 set "IDE_EXE=C:\Program Files\Bosch Rexroth\ctrlX PLC Engineering\Common\ctrlX PLC Engineering.exe"
 
 rem Optional: a .project to open when the bridge starts.

@@ -32,6 +32,7 @@ import os
 import select
 import socket
 import sys
+import re
 import tempfile
 import threading
 import time
@@ -297,6 +298,57 @@ def h_import_plcopen(a):
     return True
 
 
+def h_add_task_call(a):
+    """Add a program call to a task. There is no scripting call for it, so this round-trips the
+    task through export_native / import_native, adding an entry to its PouList. The IDE may show a
+    dialog while the task is re-imported (the user has to acknowledge it)."""
+    task = _find(a.get("task") or "Device/Plc Logic/Application/Task Configuration/MainTask")
+    program = a["program"]
+    cfg = task.parent
+    app = cfg.parent
+    if not [c for c in app.get_children(False) if c.get_name() == program]:
+        raise ValueError("program '%s' not found under '%s'" % (program, app.get_name()))
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_task.xml")
+    task.export_native(tmp)
+    with open(tmp, "rb") as f:
+        xml = f.read().decode("utf-8")
+    m = re.search(r'<List Name="PouList" Type="(\{[^}]*\})"\s*(/>|>)', xml)
+    if not m:
+        raise RuntimeError("task export has no PouList; format not understood")
+    if re.search(r'<Single Name="Name" Type="string">%s</Single>' % re.escape(program), xml[m.start():]):
+        os.remove(tmp)
+        return {"added": False, "reason": "already called by the task"}
+    item = (
+        '<Single Type="{f194d1ef-7376-42ce-a729-4a5485a97a46}" Method="IArchivable">'
+        '<Single Name="Name" Type="string">%s</Single>'
+        '<Single Name="Comment" Type="string"></Single></Single>' % program)
+    if m.group(2) == "/>":
+        xml = xml[:m.start()] + m.group(0)[:-2].rstrip() + ">" + item + "</List>" + xml[m.end():]
+    else:
+        end = xml.index("</List>", m.end())
+        xml = xml[:end] + item + xml[end:]
+    with open(tmp, "wb") as f:
+        f.write(xml.encode("utf-8"))
+    try:
+        cfg.import_native(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"added": True, "task": task.get_name(), "program": program}
+
+
+def h_remove_task_call(a):
+    """Remove a program call from a task. The calls are child objects of the task, so this needs
+    no re-import and no dialog."""
+    task = _find(a.get("task") or "Device/Plc Logic/Application/Task Configuration/MainTask")
+    program = a["program"]
+    for c in task.get_children(False):
+        if c.get_name() == program:
+            c.remove()
+            return {"removed": True, "task": task.get_name(), "program": program}
+    return {"removed": False, "reason": "the task does not call it"}
+
+
 def h_create_pou(a):
     parent = _find(a["parent"])
     kind = _enum(PouType, a.get("kind", "Program"))
@@ -521,6 +573,22 @@ def h_trace_save(a):
             "csv": raw.decode("utf-8", "replace")}
 
 
+def _jsonable(x):
+    """IronPython's json encoder calls s.decode('utf-8') on every non-ASCII str, but a str here is
+    already text (a .NET string), so one stray character such as a u-umlaut in a library name made
+    json.dumps raise, the reply was lost and the client timed out. Hand it UTF-8 bytes instead,
+    which it decodes back to the same text. CPython (the tests) needs nothing."""
+    if sys.platform == "cli" and isinstance(x, str):
+        if any(ord(c) > 127 for c in x):
+            return x.encode("utf-8")
+        return x
+    if isinstance(x, dict):
+        return dict((_jsonable(k), _jsonable(v)) for k, v in x.items())
+    if isinstance(x, (list, tuple)):
+        return [_jsonable(v) for v in x]
+    return x
+
+
 HANDLERS = dict(
     (k[2:], v) for k, v in list(globals().items())
     if k.startswith("h_") and callable(v))
@@ -624,7 +692,7 @@ def _loop(srv):
                     _log(traceback.format_exc())
                     resp = {"ok": False, "error": "bridge: %s: %s" % (type(e).__name__, e)}
                 conn.settimeout(None)
-                conn.sendall(json.dumps(resp, default=str).encode("utf-8") + b"\n")
+                conn.sendall(json.dumps(_jsonable(resp), default=str).encode("utf-8") + b"\n")
         except Exception:
             _log(traceback.format_exc())
             traceback.print_exc()
