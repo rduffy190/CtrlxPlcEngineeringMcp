@@ -293,6 +293,26 @@ def remove_task_call(program: str, task: str = "Device/Plc Logic/Application/Tas
 
 
 @mcp.tool()
+def list_io(device: str) -> Any:
+    """List the I/O channels of a device card with direction (Input/Output), bit size and the
+    variable each is mapped to (null = unmapped). device is the object path, e.g.
+    "Device/Realtime_Data/ethercat_master_instances_ethercatmaster/XI110116"; use get_tree to find cards."""
+    return call("list_io", device=device)
+
+
+@mcp.tool()
+def map_io(device: str, mappings: list[dict], app_name: str = "Application") -> Any:
+    """Map, remap or unmap I/O channels of a device card to application variables.
+    mappings: [{"channel": 1, "variable": "GVL_IO.bDI_Start"}, ...]. channel is the number or the
+    parameter name; a variable of null or "" unmaps the channel. A variable without the
+    application name in front gets "<app_name>." added (the IDE needs it). The variable must exist
+    and be compatible with the channel (BOOL for a 1-bit channel). Offline edit: the controller
+    only uses it after the next download/online change, and confirm that with the user. Run
+    build afterwards, then check list_io."""
+    return call("map_io", device=device, mappings=mappings, app_name=app_name)
+
+
+@mcp.tool()
 def create_dut(parent: str, name: str) -> Any:
     """Create a DUT under parent."""
     return call("create_dut", parent=parent, name=name)

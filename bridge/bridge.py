@@ -349,6 +349,57 @@ def h_remove_task_call(a):
     return {"removed": False, "reason": "the task does not call it"}
 
 
+def _io_params(dev):
+    """Channel parameters of an I/O device: name -> parameter (first connector, mappable ones)."""
+    out = {}
+    for c in dev.connectors:
+        for x in c.host_parameters:
+            try:
+                if x.is_mappable_io:
+                    out[x.name] = x
+            except Exception:
+                pass
+    return out
+
+
+def _io_channel(params, ch):
+    """Resolve 7, "7", "Channel_7" or "Channel_7.Value" to a parameter name."""
+    for cand in (str(ch), "Channel_%s.Value" % ch, "Channel_%s" % ch, str(ch) + ".Value"):
+        if cand in params:
+            return cand
+    raise ValueError("channel '%s' not found; have e.g. %s" % (ch, sorted(params)[:4]))
+
+
+def h_list_io(a):
+    """Channels of an I/O device with direction, bit size and mapped variable."""
+    dev = _find(a["device"])
+    chans = []
+    for name, x in _io_params(dev).items():
+        v = x.io_mapping.variable
+        chans.append({"channel": name, "direction": str(x.channel_type), "bits": x.bit_size,
+                      "variable": v if v else None})
+    chans.sort(key=lambda c: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", c["channel"])])
+    return {"device": a["device"], "channels": chans}
+
+
+def h_map_io(a):
+    """Map (or remap, or unmap with variable=None/"") channels of an I/O device to variables.
+    a["mappings"] is a list of {"channel": 1, "variable": "GVL_X.bFoo"}. A variable that does not
+    start with the application name gets "<app>." put in front (the mapping needs it)."""
+    dev = _find(a["device"])
+    app = a.get("app_name") or "Application"
+    params = _io_params(dev)
+    done = []
+    for m in a["mappings"]:
+        name = _io_channel(params, m["channel"])
+        var = m.get("variable")
+        if var and not var.startswith(app + "."):
+            var = app + "." + var
+        params[name].io_mapping.variable = var if var else ""
+        done.append({"channel": name, "variable": params[name].io_mapping.variable or None})
+    return {"device": a["device"], "mapped": done}
+
+
 def h_create_pou(a):
     parent = _find(a["parent"])
     kind = _enum(PouType, a.get("kind", "Program"))

@@ -61,7 +61,7 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 
 ## Tools
 
-Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`,
+Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`, `list_io`, `map_io`,
 `create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
 PLCopenXML: `export_plcopen`, `import_plcopen`. Ladder: `ladder_check`, `ladder_import`, `ladder_export`.
 Online: `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
@@ -167,6 +167,10 @@ These were found by trial; they explain the odd structure of `bridge/bridge.py`.
   `system.get_message_categories(True)`; do not call `system.clear_messages()` (it left the
   Messages pane broken). Compile problems can also surface only at `login`.
 - Do not force-kill the IDE after a hung call; close it normally.
+- **I/O mapping.** `list_io` shows a card's channels (an input card has `Input` channels, an output card `Output`);
+  `map_io` maps, remaps or unmaps them (`variable` null unmaps). The mapping string needs the application name in front,
+  `Application.GVL_IO.bDI_Start`; `map_io` adds it. Without it the build reports "Invalid application in mapping".
+  Cards live under `Device/Realtime_Data/<master>/<card>`. A mapping change reaches the controller on the next download.
 - **Task calls.** The scripting engine has no call to add a program to a task. `add_task_call` exports the
   task (`export_native`), adds an entry to its `PouList` and re-imports it; the IDE asks the user to allow the
   task import. `remove_task_call` removes the child call object directly (no dialog).
