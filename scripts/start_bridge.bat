@@ -22,6 +22,12 @@ set "AUTORUN=1"
 set "TOKEN_FILE=%HERE%.ctrlx_token"
 if exist "%HERE%config.bat" call "%HERE%config.bat"
 rem --------------------------------------------------------------------------------------------
+rem A second IDE instance: set BRIDGE_PORT (and optionally BRIDGE_PROJECT) before running this script.
+if defined BRIDGE_PORT set "PORT=%BRIDGE_PORT%"
+if defined BRIDGE_PROJECT set "PROJECT=%BRIDGE_PROJECT%"
+rem BRIDGE_HEADLESS=1 starts the IDE without a window (--noUI), for a helper instance.
+set "UIFLAG="
+if "%BRIDGE_HEADLESS%"=="1" set "UIFLAG=--noUI"
 rem Newer installs live under "ctrlX WORKS\ctrlX PLC Engineering\<version>\Studio\Common".
 if not exist "%IDE_EXE%" for /d %%D in ("C:\Program Files\ctrlX WORKS\ctrlX PLC Engineering\*") do (
     if exist "%%D\Studio\Common\ctrlX-PLC-Engineering.exe" set "IDE_EXE=%%D\Studio\Common\ctrlX-PLC-Engineering.exe"
@@ -48,7 +54,7 @@ if "%TUNNEL%"=="1" (
 
 if "%AUTORUN%"=="1" (
     echo Starting PLC Engineering with the bridge ...
-    start "" "%IDE_EXE%" --runscript="%BRIDGE%"
+    start "" "%IDE_EXE%" %UIFLAG% --runscript="%BRIDGE%"
     echo.
     echo When the IDE has loaded, the bridge log should say "loop started":
     echo   %%TEMP%%\ctrlx_bridge.log

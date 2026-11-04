@@ -51,7 +51,9 @@ PROJECT = os.environ.get("CTRLX_MCP_PROJECT", "")
 # 1 = serve on the script thread and never return (headless --noUI, where returning ends the process)
 BLOCK = os.environ.get("CTRLX_MCP_BLOCK", "0") == "1"
 UI = os.environ.get("CTRLX_MCP_UI", "1") == "1"   # run each request on the IDE UI thread
-LOG = os.path.join(os.environ.get("TEMP", tempfile.gettempdir()), "ctrlx_bridge.log")
+# One log per port so several IDE instances (each with its own bridge port) do not share a file.
+LOG = os.path.join(os.environ.get("TEMP", tempfile.gettempdir()),
+                   "ctrlx_bridge.log" if PORT == 8765 else "ctrlx_bridge_%d.log" % PORT)
 MAX_REQUEST = 16 * 1024 * 1024
 
 # Live objects that must outlive a single request.
@@ -638,6 +640,78 @@ def _jsonable(x):
     if isinstance(x, (list, tuple)):
         return [_jsonable(v) for v in x]
     return x
+
+
+# Objects that every new application has; anything else in an imported visualization export is HMI content.
+_APP_FIXED = ("Library Manager", "PLC_PRG", "Symbols", "Task Configuration", "CheckFunctions",
+              "__VisualizationStyle")
+_APP_PATH = "Device/Plc Logic/Application"
+
+
+def h_visu_extract(a):
+    """Helper-instance step of import_visu: import a visualization export (it carries a whole device tree)
+    into a fresh temp project, then export the HMI objects (Visualization Manager, text lists, visus)
+    one by one as object-level native files that paste into any application."""
+    out = a["out_dir"]
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    proj = projects.create(os.path.join(out, "hmi_tmp.project"), True)
+    try:
+        proj.import_native(a["file"])
+        app = _find(a.get("app") or _APP_PATH)
+        res = []
+        for c in app.get_children(False):
+            n = c.get_name()
+            if n in _APP_FIXED or n.startswith("__"):
+                continue
+            f = os.path.join(out, n.replace(" ", "_") + ".native")
+            c.export_native(f)
+            res.append({"name": n, "file": f})
+    finally:
+        proj.close()
+    return res
+
+
+def h_visu_apply(a):
+    """Import the object files made by visu_extract into the application. Existing objects of the same
+    name are replaced; an existing Visualization Manager is kept (its web visus live under it)."""
+    app = _find(a.get("app") or _APP_PATH)
+    replace = a.get("replace", True)
+    done, skipped = [], []
+    for o in a["objects"]:
+        same = [c for c in app.get_children(False) if c.get_name() == o["name"]]
+        if same and o["name"] == "Visualization Manager":
+            skipped.append(o["name"])
+            continue
+        if same and not replace:
+            skipped.append(o["name"])
+            continue
+        for c in same:
+            c.remove()
+        app.import_native(o["file"])
+        done.append(o["name"])
+    return {"imported": done, "skipped": skipped}
+
+
+def h_web_visu_add(a):
+    """Import a WebVisualization object (native XML text built by the server) under the Visualization
+    Manager, replacing one of the same name."""
+    app = _find(a.get("app") or _APP_PATH)
+    vm = [c for c in app.get_children(False) if c.get_name() == "Visualization Manager"]
+    if not vm:
+        raise ValueError("no Visualization Manager in the application; run import_visu first")
+    for c in vm[0].get_children(False):
+        if c.get_name() == a["name"]:
+            c.remove()
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_webvisu.native")
+    with open(tmp, "wb") as f:
+        f.write(a["xml"].encode("utf-8"))
+    try:
+        vm[0].import_native(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"name": a["name"]}
 
 
 HANDLERS = dict(

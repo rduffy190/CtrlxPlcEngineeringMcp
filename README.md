@@ -63,8 +63,11 @@ the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrl
 
 Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`, `list_io`, `map_io`,
 `create_dut`, `create_gvl`, `delete_object`, `build`, `messages`.
+HMI: `build_hmi` (screen definition to `.export`, plus SVG previews), `import_visu` (a visugen `.export` into the open project),
+`add_web_visu` (web visualization that starts on a visu), `publish_hmi` (build, import, web visu and save in one call; needs the ctrlx-hmi skill).
+
 PLCopenXML: `export_plcopen`, `import_plcopen`. Ladder: `ladder_check`, `ladder_import`, `ladder_export`.
-Online: `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
+Online (the user logs in and downloads in the IDE themselves; `login` can fail on the download confirmation dialog): `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
 Trace: `trace_setup`, `trace_run`, `trace_stop`, `trace_wait`, `trace_save`.
 Escape hatch: `exec_script` (runs IronPython in the IDE; use `dir()` to explore the API).
 
@@ -200,3 +203,15 @@ to a temp file) including a ladder block, driven through `exec_script`. Not exer
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## HMI import
+
+A visualization export from the ctrlx-hmi skill carries the whole device tree, and an open project refuses it
+("cannot be pasted here"). `import_visu` starts a second, headless IDE (`--noUI`) as a helper on
+`CTRLX_HELPER_PORT` (default 8766), imports the export into a temp project there, exports only the Visualization
+Manager, text lists and visus as object files (`visu_extract`), stops the helper and imports the files into the open
+project (`visu_apply`). Same-named objects are replaced; an existing Visualization Manager is kept. `add_web_visu`
+fills `server/templates/webvisu.template.native` (a real export of a WebVisualization) with the start visu and client
+size (1920x1080 by default). The scripting engine has no call to create visualizations. The bridge log of a helper
+is `%TEMP%\ctrlx_bridge_<port>.log`; `start_bridge.bat` also takes `BRIDGE_PORT`, `BRIDGE_PROJECT` and
+`BRIDGE_HEADLESS=1` for a second instance by hand.

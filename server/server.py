@@ -49,9 +49,13 @@ class BridgeError(RuntimeError):
 
 def call(cmd: str, timeout: float = 60, **args: Any) -> Any:
     """One request/response round trip to the bridge."""
+    return _rpc(PORT, cmd, timeout, args)
+
+
+def _rpc(port: int, cmd: str, timeout: float, args: dict) -> Any:
     req = json.dumps({"id": 1, "token": TOKEN, "cmd": cmd, "args": args}).encode() + b"\n"
     try:
-        with socket.create_connection((HOST, PORT), timeout=10) as s:
+        with socket.create_connection((HOST, port), timeout=10) as s:
             s.sendall(req)
             s.settimeout(timeout)
             buf = b""
@@ -61,7 +65,7 @@ def call(cmd: str, timeout: float = 60, **args: Any) -> Any:
                     break
                 buf += chunk
     except OSError as e:
-        raise BridgeError(f"bridge unreachable at {HOST}:{PORT}: {e}") from e
+        raise BridgeError(f"bridge unreachable at {HOST}:{port}: {e}") from e
     resp = json.loads(buf)
     if not resp.get("ok"):
         raise BridgeError(resp.get("error", "unknown error") + "\n" + resp.get("traceback", ""))
@@ -346,7 +350,11 @@ def messages() -> Any:
 
 @mcp.tool()
 def login(app: str, download: bool = False, change: str = "Try") -> Any:
-    """Log in to the application at path `app`. ALWAYS ask the user how to download the application before
+    """NOTE: the user must log in (and download) themselves in the IDE: the download needs a confirmation
+    dialog that a script cannot answer, so this call can fail with just "Login failed...". Ask the user to
+    log in, then check run_state.
+
+    Log in to the application at path `app`. ALWAYS ask the user how to download the application before
     calling; an application download can stop it and reset its variables (a trace download is separate
     and harmless, see trace_run).
 
@@ -435,6 +443,145 @@ def trace_save(trace: str, max_rows: int = 500) -> Any:
     """Stop the trace, export CSV and return value changes per variable (time_ms plus one column each)."""
     res = call("trace_save", timeout=120, trace=trace)
     return parse_csv(res["csv"], max_rows)
+
+
+# ---- HMI (visualizations)
+#
+# A visualization export made by the ctrlx-hmi skill (visugen) carries the whole device tree, which an
+# existing project refuses ("cannot be pasted here"). import_visu therefore starts a second, headless
+# IDE as a helper, imports the export into a temp project there, exports just the HMI objects, and
+# imports those into the open project. The helper runs on CTRLX_HELPER_PORT (default 8766) and is
+# stopped afterwards.
+
+HELPER_PORT = int(os.environ.get("CTRLX_HELPER_PORT", "8766"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _ide_exe() -> str:
+    exe = os.environ.get("CTRLX_IDE_EXE", "")
+    if not exe:
+        try:  # scripts/config.bat: set "IDE_EXE=..."
+            with open(os.path.join(_ROOT, "scripts", "config.bat"), encoding="utf-8-sig") as f:
+                m = re.search(r'set\s+"?IDE_EXE=([^"\r\n]+)', f.read(), re.I)
+            exe = m.group(1) if m else ""
+        except OSError:
+            pass
+    if not exe or not os.path.exists(exe):
+        import glob
+        found = sorted(glob.glob(
+            r"C:\Program Files\ctrlX WORKS\ctrlX PLC Engineering\*\Studio\Common\ctrlX-PLC-Engineering.exe"))
+        exe = found[-1] if found else ""
+    if not exe:
+        raise BridgeError("IDE not found; set CTRLX_IDE_EXE")
+    return exe
+
+
+def _helper_stop(proc: subprocess.Popen) -> None:
+    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+
+
+def _helper_start() -> subprocess.Popen:
+    import time
+    env = dict(os.environ, CTRLX_MCP_PORT=str(HELPER_PORT), CTRLX_MCP_TOKEN=TOKEN, CTRLX_MCP_PROJECT="")
+    proc = subprocess.Popen(
+        [_ide_exe(), "--noUI", "--runscript=" + os.path.join(_ROOT, "bridge", "bridge.py")],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            _rpc(HELPER_PORT, "ping", 20, {})
+            return proc
+        except BridgeError:
+            time.sleep(2)
+    _helper_stop(proc)
+    raise BridgeError(f"headless helper IDE did not come up on port {HELPER_PORT}")
+
+
+@mcp.tool()
+def import_visu(export_file: str, app: str = "Device/Plc Logic/Application", replace: bool = True) -> Any:
+    """Import the visualizations and text lists from a visualization export (the .export file written by
+    the ctrlx-hmi skill's visugen) into the open project's application, end to end. Starts a headless
+    helper IDE for a minute or so. Objects of the same name are replaced (replace=True); an existing
+    Visualization Manager is kept. Not saved: call save_project. Afterwards open the GlobalTextList and run
+    Update Visualization Text IDs once. Use add_web_visu to publish a screen as a web visualization."""
+    export_file = os.path.abspath(export_file)
+    if not os.path.exists(export_file):
+        raise BridgeError(f"no such file: {export_file}")
+    out = tempfile.mkdtemp(prefix="ctrlx_visu_")
+    proc = _helper_start()
+    try:
+        objs = _rpc(HELPER_PORT, "visu_extract", 150, {"file": export_file, "out_dir": out, "app": app})
+    finally:
+        _helper_stop(proc)
+    if not objs:
+        raise BridgeError("the export contained no visualization objects")
+    return call("visu_apply", timeout=300, objects=objs, app=app, replace=replace)
+
+
+@mcp.tool()
+def add_web_visu(start_visu: str, name: str = "HMI", width: int = 1920, height: int = 1080,
+                 app: str = "Device/Plc Logic/Application") -> Any:
+    """Add (or replace) a web visualization under the Visualization Manager that starts on the visu
+    `start_visu` (for example INT_Main) with the given client size (1080p by default). Needs the
+    Visualization Manager, so run import_visu first. Not saved: call save_project."""
+    import uuid
+    with open(os.path.join(_ROOT, "server", "templates", "webvisu.template.native"), encoding="utf-8") as f:
+        x = f.read()
+
+    def setv(tag: str, val: str) -> None:
+        nonlocal x
+        x, n = re.subn(r'(<Single Name="%s" Type="[^"]*">)[^<]*(</Single>)' % tag,
+                       lambda m: m.group(1) + val + m.group(2), x)
+        if n != 1:
+            raise BridgeError(f"web visu template has no {tag}")
+    setv("StartVisu", start_visu)
+    setv("ClientSizeX", str(width))
+    setv("ClientSizeY", str(height))
+    setv("Name", name)
+    x = re.sub(r'(<Single Name="Guid" Type="System.Guid">)[^<]*', lambda m: m.group(1) + str(uuid.uuid4()),
+               x, count=1)
+    return call("web_visu_add", name=name, xml=x, app=app)
+
+
+@mcp.tool()
+def build_hmi(screen_file: str, out_file: str = "", scenarios_file: str = "", preview_dir: str = "") -> Any:
+    """Generate a visualization export from a screen definition (the ctrlx-hmi skill's visugen), and
+    optionally render SVG previews. `screen_file` is a Python screen definition (see the ctrlx-hmi skill);
+    `out_file` defaults to build/<name>.export next to it. With `scenarios_file` (SCENARIOS = {name:
+    {variable: value}}) the previews are written to `preview_dir` (default build/preview). Returns the
+    export path and the preview files; look at the SVGs before importing. Needs the ctrlx-hmi skill."""
+    screen_file = os.path.abspath(screen_file)
+    if not os.path.isfile(screen_file):
+        raise BridgeError(f"no such file: {screen_file}")
+    base = os.path.dirname(screen_file)
+    out_file = os.path.abspath(out_file or os.path.join(
+        base, "build", os.path.splitext(os.path.basename(screen_file))[0].replace("screen_", "") + ".export"))
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    rc, out = _run_script([_skill_script("ctrlx-hmi", "visugen.py"), screen_file, out_file])
+    if rc != 0:
+        raise BridgeError("visugen failed:\n" + out)
+    res: dict[str, Any] = {"export": out_file, "log": out}
+    if scenarios_file:
+        pdir = os.path.abspath(preview_dir or os.path.join(os.path.dirname(out_file), "preview"))
+        rc, out = _run_script([_skill_script("ctrlx-hmi", "preview.py"), out_file,
+                               os.path.abspath(scenarios_file), pdir])
+        if rc != 0:
+            raise BridgeError("preview failed:\n" + out)
+        res["previews"] = sorted(os.path.join(pdir, f) for f in os.listdir(pdir) if f.endswith(".svg"))
+    return res
+
+
+@mcp.tool()
+def publish_hmi(screen_file: str, start_visu: str, name: str = "HMI", width: int = 1920, height: int = 1080,
+                app: str = "Device/Plc Logic/Application", save: bool = True) -> Any:
+    """The whole HMI pipeline in one call: build_hmi (screen definition -> export), import_visu into the
+    open project, add_web_visu starting on `start_visu`, then save_project. Preview with build_hmi first.
+    Afterwards, once, in the IDE: open the GlobalTextList and run Update Visualization Text IDs, then build."""
+    built = build_hmi(screen_file)
+    imported = import_visu(built["export"], app=app)
+    web = add_web_visu(start_visu, name=name, width=width, height=height, app=app)
+    saved = save_project() if save else None
+    return {"export": built["export"], "import": imported, "web_visu": web, "saved": saved}
 
 
 # ---- escape hatch
