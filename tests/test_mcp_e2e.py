@@ -115,11 +115,14 @@ APP = "Device/PLC Logic/Application"
 
 def data(res):
     assert not res.isError, res.content
-    text = "".join(c.text for c in res.content)
     try:
-        return json.loads(text)
+        return json.loads("".join(c.text for c in res.content))
     except ValueError:
-        return text
+        pass
+    try:                                   # a list result arrives as one content block per element
+        return [json.loads(c.text) for c in res.content]
+    except ValueError:
+        return "".join(c.text for c in res.content)
 
 
 def make_skills():
