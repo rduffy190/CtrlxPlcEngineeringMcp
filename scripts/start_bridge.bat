@@ -45,6 +45,7 @@ for %%I in ("%BRIDGE%") do set "BRIDGE=%%~fI"
 
 set /p CTRLX_MCP_TOKEN=<"%TOKEN_FILE%"
 set "CTRLX_MCP_PORT=%PORT%"
+set "CTRLX_MCP_BRIDGE=%BRIDGE%"
 set "CTRLX_MCP_PROJECT=%PROJECT%"
 
 if "%TUNNEL%"=="1" (

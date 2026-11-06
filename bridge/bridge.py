@@ -727,6 +727,124 @@ def h_visu_apply(a):
     return {"imported": done, "skipped": skipped}
 
 
+def _rpc_local(port, cmd, args, timeout=60):
+    """One request to another bridge on this machine (the headless helper IDE)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        s.sendall((json.dumps({"id": 1, "token": TOKEN, "cmd": cmd, "args": args}) + "\n").encode("utf-8"))
+        s.settimeout(timeout)
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    resp = json.loads(buf.decode("utf-8"))
+    if not resp.get("ok"):
+        raise RuntimeError("helper: %s" % resp.get("error"))
+    return resp.get("result")
+
+
+_hiders = {}   # helper pid -> threading.Event that stops its window hider
+
+
+def _hide_windows_of(pid):
+    """Hide every visible top-level window of process `pid` (--noUI still flashes a splash/main window)."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+    def cb(hwnd, lparam):
+        owner = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            user32.ShowWindow(hwnd, 0)   # SW_HIDE
+        return 1
+    user32.EnumWindows(proto(cb), 0)
+
+
+def _keep_hidden(pid):
+    stop = threading.Event()
+    _hiders[pid] = stop
+
+    def run():
+        while not stop.is_set():
+            try:
+                _hide_windows_of(pid)
+            except Exception as e:
+                _log("window hider: %r" % (e,))
+                return
+            stop.wait(0.15)
+    t = threading.Thread(target=run)
+    t.daemon = True
+    t.start()
+
+
+def _start_helper_ide(port):
+    """Start a second, windowless IDE running this bridge on `port`. Returns the Process."""
+    from System.Diagnostics import Process, ProcessStartInfo, ProcessWindowStyle
+    exe = Process.GetCurrentProcess().MainModule.FileName
+    script = os.environ.get("CTRLX_MCP_BRIDGE") or globals().get("__file__")
+    if not script or not os.path.exists(script):
+        raise RuntimeError("bridge script path unknown; start the IDE with scripts\\start_bridge.bat")
+    psi = ProcessStartInfo(exe, '--noUI --runscript="%s"' % script)
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    psi.WindowStyle = ProcessWindowStyle.Hidden
+    psi.EnvironmentVariables["CTRLX_MCP_PORT"] = str(port)
+    psi.EnvironmentVariables["CTRLX_MCP_TOKEN"] = TOKEN
+    psi.EnvironmentVariables["CTRLX_MCP_PROJECT"] = ""
+    psi.EnvironmentVariables["CTRLX_MCP_BRIDGE"] = script
+    proc = Process.Start(psi)
+    _keep_hidden(proc.Id)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            _rpc_local(port, "ping", {}, 20)
+            return proc
+        except Exception:
+            time.sleep(2)
+    _stop_helper_ide(proc)
+    raise RuntimeError("helper IDE did not come up on port %d" % port)
+
+
+def _stop_helper_ide(proc):
+    from System.Diagnostics import Process, ProcessStartInfo
+    ev = _hiders.pop(proc.Id, None)
+    if ev is not None:
+        ev.set()
+    psi = ProcessStartInfo("taskkill", "/PID %d /T /F" % proc.Id)
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    Process.Start(psi).WaitForExit(15000)
+
+
+def h_visu_import(a):
+    """Import a visualization export (XML text in `xml`, or a path on this machine in `file`) into the
+    application. A visugen export carries a whole device tree, which an open project refuses, so a headless
+    helper IDE (CTRLX_HELPER_PORT, default 8766) imports it into a temp project and exports just the HMI
+    objects; those are then imported here. Everything runs on the machine with the IDE, so the caller can
+    be anywhere (for example Linux over the tunnel)."""
+    out = tempfile.mkdtemp(prefix="ctrlx_visu_")
+    if a.get("xml") is not None:
+        src = os.path.join(out, "export.export")
+        with open(src, "wb") as f:
+            f.write(a["xml"].encode("utf-8"))
+    else:
+        src = a["file"]
+    port = int(os.environ.get("CTRLX_HELPER_PORT", "8766"))
+    proc = _start_helper_ide(port)
+    try:
+        objs = _rpc_local(port, "visu_extract", {"file": src, "out_dir": out, "app": a.get("app")}, 150)
+    finally:
+        _stop_helper_ide(proc)
+    if not objs:
+        raise RuntimeError("the export contained no visualization objects")
+    return h_visu_apply({"objects": objs, "app": a.get("app"), "replace": a.get("replace", True)})
+
+
 def h_web_visu_add(a):
     """Import a WebVisualization object (native XML text built by the server) under the Visualization
     Manager, replacing one of the same name."""

@@ -504,74 +504,28 @@ def trace_save(trace: str, max_rows: int = 500) -> Any:
 # ---- HMI (visualizations)
 #
 # A visualization export made by the ctrlx-hmi skill (visugen) carries the whole device tree, which an
-# existing project refuses ("cannot be pasted here"). import_visu therefore starts a second, headless
-# IDE as a helper, imports the export into a temp project there, exports just the HMI objects, and
-# imports those into the open project. The helper runs on CTRLX_HELPER_PORT (default 8766) and is
-# stopped afterwards.
+# existing project refuses ("cannot be pasted here"). The bridge (on the machine with the IDE) therefore
+# starts a second, headless IDE as a helper, imports the export into a temp project there, exports just the
+# HMI objects and imports those into the open project. The export is sent to the bridge as text, so this
+# works the same with the server on Linux over the tunnel.
 
-HELPER_PORT = int(os.environ.get("CTRLX_HELPER_PORT", "8766"))
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _ide_exe() -> str:
-    exe = os.environ.get("CTRLX_IDE_EXE", "")
-    if not exe:
-        try:  # scripts/config.bat: set "IDE_EXE=..."
-            with open(os.path.join(_ROOT, "scripts", "config.bat"), encoding="utf-8-sig") as f:
-                m = re.search(r'set\s+"?IDE_EXE=([^"\r\n]+)', f.read(), re.I)
-            exe = m.group(1) if m else ""
-        except OSError:
-            pass
-    if not exe or not os.path.exists(exe):
-        import glob
-        found = sorted(glob.glob(
-            r"C:\Program Files\ctrlX WORKS\ctrlX PLC Engineering\*\Studio\Common\ctrlX-PLC-Engineering.exe"))
-        exe = found[-1] if found else ""
-    if not exe:
-        raise BridgeError("IDE not found; set CTRLX_IDE_EXE")
-    return exe
-
-
-def _helper_stop(proc: subprocess.Popen) -> None:
-    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-
-
-def _helper_start() -> subprocess.Popen:
-    import time
-    env = dict(os.environ, CTRLX_MCP_PORT=str(HELPER_PORT), CTRLX_MCP_TOKEN=TOKEN, CTRLX_MCP_PROJECT="")
-    proc = subprocess.Popen(
-        [_ide_exe(), "--noUI", "--runscript=" + os.path.join(_ROOT, "bridge", "bridge.py")],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        try:
-            _rpc(HELPER_PORT, "ping", 20, {})
-            return proc
-        except BridgeError:
-            time.sleep(2)
-    _helper_stop(proc)
-    raise BridgeError(f"headless helper IDE did not come up on port {HELPER_PORT}")
 
 
 @mcp.tool()
 def import_visu(export_file: str, app: str = "Device/Plc Logic/Application", replace: bool = True) -> Any:
     """Import the visualizations and text lists from a visualization export (the .export file written by
-    the ctrlx-hmi skill's visugen) into the open project's application, end to end. Starts a headless
-    helper IDE for a minute or so. Objects of the same name are replaced (replace=True); an existing
-    Visualization Manager is kept. Not saved: call save_project. Afterwards open the GlobalTextList and run
-    Update Visualization Text IDs once. Use add_web_visu to publish a screen as a web visualization."""
+    the ctrlx-hmi skill's visugen; a path on the machine running this server) into the open project's
+    application, end to end. The IDE machine starts a headless helper IDE for a minute or so. Objects of
+    the same name are replaced (replace=True); an existing Visualization Manager is kept. Not saved: call
+    save_project. Afterwards open the GlobalTextList and run Update Visualization Text IDs once. Use
+    add_web_visu to publish a screen as a web visualization."""
     export_file = os.path.abspath(export_file)
     if not os.path.exists(export_file):
         raise BridgeError(f"no such file: {export_file}")
-    out = tempfile.mkdtemp(prefix="ctrlx_visu_")
-    proc = _helper_start()
-    try:
-        objs = _rpc(HELPER_PORT, "visu_extract", 150, {"file": export_file, "out_dir": out, "app": app})
-    finally:
-        _helper_stop(proc)
-    if not objs:
-        raise BridgeError("the export contained no visualization objects")
-    return call("visu_apply", timeout=300, objects=objs, app=app, replace=replace)
+    with open(export_file, encoding="utf-8-sig") as f:
+        xml = f.read()
+    return call("visu_import", timeout=420, xml=xml, app=app, replace=replace)
 
 
 @mcp.tool()

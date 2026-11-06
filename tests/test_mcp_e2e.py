@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(ROOT, "bridge"))
 sys.path.insert(0, os.path.join(ROOT, "server"))
 PORT = "18766"
 TOKEN = "e2e-token"
-os.environ.update(CTRLX_MCP_TOKEN=TOKEN, CTRLX_MCP_PORT=PORT)
+os.environ.update(CTRLX_MCP_TOKEN=TOKEN, CTRLX_MCP_PORT=PORT, CTRLX_AUTOSTART="0")  # a test must never start the real IDE
 
 from mcp import ClientSession, StdioServerParameters  # noqa: E402
 from mcp.client.stdio import stdio_client  # noqa: E402
@@ -152,7 +152,7 @@ print("TRACE " + open(sys.argv[1], encoding="utf-8").read())
 async def run():
     params = StdioServerParameters(
         command=sys.executable, args=[os.path.join(ROOT, "server", "server.py")],
-        env={**os.environ, "CTRLX_BRIDGE_PORT": PORT, "CTRLX_SKILLS_DIR": make_skills()})
+        env={**os.environ, "CTRLX_AUTOSTART": "0", "CTRLX_BRIDGE_PORT": PORT, "CTRLX_SKILLS_DIR": make_skills()})
     async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         tools = {t.name for t in (await s.list_tools()).tools}

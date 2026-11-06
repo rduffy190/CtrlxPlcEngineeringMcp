@@ -59,6 +59,25 @@ If the IDE misbehaves when the script loads at startup, set `AUTORUN=0` in `conf
 the bridge from Tools > Scripting > Execute Script File. Its log is `%TEMP%\ctrlx_bridge.log`
 (`online context saved` and `ui dispatch ready` should appear, then `loop started`).
 
+## Windows vs Linux
+
+Which setup you have decides how the server is registered and what it can do for you. The tools are the same in
+both; the differences are in starting the IDE and where files live.
+
+| | Everything on one Windows PC | Claude Code on Linux/WSL, IDE on Windows (tunnel) |
+|---|---|---|
+| Register the server | `scripts\install_windows.bat` (or add it at user scope in `~/.claude.json` so every workspace sees it) | `.mcp.json` in this folder (`.venv/bin/python`); open a new terminal after `install_token.sh` |
+| Token | `scripts\.ctrlx_token`, read by the server | `CTRLX_MCP_TOKEN` in the environment, the same value in `scripts\.ctrlx_token` on Windows |
+| Reaching the bridge | direct, `127.0.0.1:8765` (`TUNNEL=0`) | SSH reverse tunnel opened by `start_bridge.bat` (`TUNNEL=1`, needs key-based SSH to the Linux box) |
+| Starting the IDE | automatic: the first tool call runs `start_bridge.bat` and waits about a minute (`CTRLX_AUTOSTART=0` turns it off) | by hand: run `scripts\start_bridge.bat` on the Windows machine before using the tools |
+| Skills (`ctrlx-engineer`, `codesys-lad`, `ctrlx-hmi`) | `%USERPROFILE%\.claude\skills` or `CTRLX_SKILLS_DIR` | `~/.claude/skills` or `CTRLX_SKILLS_DIR` on the Linux side |
+| Paths you pass | Windows paths, for the IDE and the server alike | Project and object paths are Windows paths on the IDE machine (`open_project`, `import_plcopen` with `file`); files for the server (`import_visu`'s export, `build_hmi`'s screen) are Linux paths and are sent over the tunnel as text |
+| HMI import | the bridge runs the headless helper IDE on this PC | the same: the bridge, on the Windows machine, runs it; nothing extra to install on Linux |
+
+Not available over the tunnel: auto-start (the server cannot launch an IDE on another machine). The helper IDE
+for `import_visu` needs a free port on the Windows machine (`CTRLX_HELPER_PORT`, default 8766), which is
+not part of the tunnel.
+
 ## Tools
 
 Project: `ping`, `open_project`, `save_project`, `get_tree`, `get_pou`, `set_pou`, `create_pou`, `add_task_call`, `remove_task_call`, `list_io`, `map_io`,
@@ -208,14 +227,17 @@ MIT, see [LICENSE](LICENSE).
 ## HMI import
 
 A visualization export from the ctrlx-hmi skill carries the whole device tree, and an open project refuses it
-("cannot be pasted here"). `import_visu` starts a second, headless IDE (`--noUI`) as a helper on
-`CTRLX_HELPER_PORT` (default 8766), imports the export into a temp project there, exports only the Visualization
-Manager, text lists and visus as object files (`visu_extract`), stops the helper and imports the files into the open
-project (`visu_apply`). Same-named objects are replaced; an existing Visualization Manager is kept. `add_web_visu`
-fills `server/templates/webvisu.template.native` (a real export of a WebVisualization) with the start visu and client
-size (1920x1080 by default). The scripting engine has no call to create visualizations. The bridge log of a helper
-is `%TEMP%\ctrlx_bridge_<port>.log`; `start_bridge.bat` also takes `BRIDGE_PORT`, `BRIDGE_PROJECT` and
-`BRIDGE_HEADLESS=1` for a second instance by hand.
+("cannot be pasted here"). The server sends the export to the bridge as text (`visu_import`), so it works the same
+from Linux over the tunnel. The bridge, on the machine with the IDE, starts a second, headless IDE (`--noUI`, its
+windows hidden) as a helper on `CTRLX_HELPER_PORT` (default 8766), imports the export into a temp project there,
+exports only the Visualization Manager, text lists and visus as object files (`visu_extract`), stops the helper and
+imports the files into the open project (`visu_apply`). Same-named objects are replaced; an existing Visualization
+Manager is kept. `add_web_visu` fills `server/templates/webvisu.template.native` (a real export of a
+WebVisualization) with the start visu and client size (1920x1080 by default). The scripting engine has no call to
+create visualizations. The helper's log is `%TEMP%\ctrlx_bridge_<port>.log`; `start_bridge.bat` also takes
+`BRIDGE_PORT`, `BRIDGE_PROJECT` and `BRIDGE_HEADLESS=1` for a second instance by hand. `build_hmi` and
+`publish_hmi` run the skill's generator on the machine running the server, which needs the ctrlx-hmi skill there
+(`CTRLX_SKILLS_DIR`).
 
 ## Auto-start
 
@@ -223,3 +245,6 @@ On Windows, when the bridge is on this PC and a tool call finds nothing listenin
 `scripts\start_bridge.bat` itself (IDE plus bridge, and the project from `config.bat`) and waits up to three
 minutes for it, so the first call after boot takes about a minute. It tries once per five minutes.
 `CTRLX_AUTOSTART=0` turns it off.
+
+Over the SSH tunnel (Linux client) the server cannot start the IDE, so start `scripts\start_bridge.bat` on the
+Windows machine first; everything else, including the HMI tools, works the same.
