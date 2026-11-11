@@ -112,9 +112,12 @@ def _rpc(port: int, cmd: str, timeout: float, args: dict) -> Any:
     return resp.get("result")
 
 
-def parse_csv(text: str, max_rows: int) -> dict:
+def parse_csv(text: str, max_rows: int, mode: str = "changes", start_ms: Optional[int] = None,
+              end_ms: Optional[int] = None, variables: Optional[list[str]] = None) -> dict:
     """Parse a ctrlX trace export: a key;value header, then per variable `N.Variable; name` and
-    `N.Data;` followed by `; time_ms; value` rows. Returns the series merged into a change table."""
+    `N.Data;` followed by `; time_ms; value` rows. mode "changes" (default) returns only the rows
+    where any value changed; "samples" returns every sample time. start_ms/end_ms cut a time
+    window and `variables` keeps only those columns (matched by exact name or by suffix)."""
     names: dict[int, str] = {}
     series: dict[int, dict[int, str]] = {}
     cur = None
@@ -135,15 +138,26 @@ def parse_csv(text: str, max_rows: int) -> dict:
         elif cur is None and len(parts) == 2 and parts[0] in ("Name", "IecTaskName", "EveryNCycles"):
             meta[parts[0]] = parts[1]
     ids = sorted(series)
+    if variables:
+        want = [v.removeprefix("Application.") for v in variables]
+        ids = [k for k in ids if any(names.get(k, "") == w or names.get(k, "").endswith("." + w) for w in want)]
+        if not ids:
+            raise BridgeError("none of %s is in the trace (it has: %s)" % (variables, sorted(names.values())))
     times = sorted({t for k in ids for t in series[k]})
     rows, prev = [], None
     for t in times:
         row = [series[k].get(t, prev[i] if prev else "") for i, k in enumerate(ids)]
-        if row != prev:
+        if mode == "samples" or row != prev:
             rows.append([t] + row)
         prev = row
+    if start_ms is not None:
+        rows = [r for r in rows if r[0] >= start_ms]
+    if end_ms is not None:
+        rows = [r for r in rows if r[0] <= end_ms]
+    key = "samples_rows" if mode == "samples" else "changes"
     return {"meta": meta, "columns": ["time_ms"] + [names.get(k, str(k)) for k in ids],
-            "samples": len(times), "changes": rows[:max_rows], "truncated": len(rows) > max_rows}
+            "samples": len(times), key: rows[:max_rows], "truncated": len(rows) > max_rows,
+            "first_ms": times[0] if times else None, "last_ms": times[-1] if times else None}
 
 
 # ---- project
@@ -233,7 +247,9 @@ def _run_script(args: list[str], timeout: float = 120) -> tuple[int, str]:
     env = dict(os.environ)
     lad = os.path.join(SKILLS, "codesys-lad", "scripts")
     env["PYTHONPATH"] = lad + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout, env=env)
+    # stdin from NUL: a child that inherits the MCP server's stdio pipe can hang on Windows
+    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout, env=env,
+                       stdin=subprocess.DEVNULL)
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
@@ -460,15 +476,49 @@ def write_var(app: str, values: dict[str, Any]) -> Any:
 # ---- trace
 
 @mcp.tool()
-def trace_setup(trace: str, samples: int, variables: Optional[list[str]] = None, every_n_cycles: Optional[int] = None,
-                resolution: Optional[str] = None, trigger_variable: Optional[str] = None,
-                trigger_edge: str = "Positive", trigger_level: Optional[float] = None) -> Any:
-    """Configure an existing trace object (add it in the IDE first: Add Object > Trace; scripts cannot
-    create one). ALWAYS ask the user how many `samples` the trace should use before calling; never
-    pick a number yourself. Variables are relative to the application, e.g. 'PRG_Main.bEnable'."""
-    return call("trace_setup", trace=trace, variables=variables, every_n_cycles=every_n_cycles,
-                resolution=resolution, trigger_variable=trigger_variable, trigger_edge=trigger_edge,
-                trigger_level=trigger_level, samples=samples)
+def list_traces(app: str = "Device/Plc Logic/Application") -> Any:
+    """List the trace objects in the application: path, recorded variables, samples and trigger."""
+    return call("list_traces", app=app)
+
+
+@mcp.tool()
+def get_trace(trace: str) -> Any:
+    """Read a trace's configuration without changing it: recorded variables, how many variables each
+    diagram draws, every_n_cycles, resolution, trigger (enabled, variable, edge, level), post-trigger
+    samples, auto_start, task_name, record_condition, comment, plus run state if it was started."""
+    return call("get_trace", trace=trace)
+
+
+@mcp.tool()
+def create_trace(name: str, parent: str = "Device/Plc Logic/Application", replace: bool = False) -> Any:
+    """Create an empty trace object under parent (the application by default). Scripts cannot do this
+    directly, so the bridge imports a blank trace from a template. Configure it with trace_setup. Not
+    saved: call save_project. To remove a trace use delete_object. replace=True overwrites a trace of the
+    same name (confirm with the user first)."""
+    with open(os.path.join(_ROOT, "server", "templates", "trace.template.native"), encoding="utf-8") as f:
+        xml = f.read()
+    return call("trace_create", timeout=120, name=name, parent=parent, replace=replace, xml=xml)
+
+
+@mcp.tool()
+def trace_setup(trace: str, samples: Optional[int] = None, variables: Optional[list[str]] = None,
+                add_variables: Optional[list[str]] = None, remove_variables: Optional[list[str]] = None,
+                every_n_cycles: Optional[int] = None, resolution: Optional[str] = None,
+                trigger_variable: Optional[str] = None, trigger_edge: Optional[str] = None,
+                trigger_level: Optional[float] = None, trigger_enabled: Optional[bool] = None,
+                auto_start: Optional[bool] = None, task_name: Optional[str] = None,
+                record_condition: Optional[str] = None, comment: Optional[str] = None) -> Any:
+    """Configure a trace object (create_trace, or add one in the IDE). Only the arguments you give change;
+    the full configuration comes back. `variables` replaces the recorded list, `add_variables` and
+    `remove_variables` change it a little. ALWAYS ask the user how many `samples` (post-trigger) the trace
+    should use before setting it; never pick a number yourself. Variables are relative to the application,
+    e.g. 'PRG_Main.bEnable'. A trigger_variable switches the trigger on (edge Positive by default);
+    trigger_enabled=False turns it off. Download again (trace_run) after changing anything."""
+    return call("trace_setup", trace=trace, variables=variables, add_variables=add_variables,
+                remove_variables=remove_variables, every_n_cycles=every_n_cycles, resolution=resolution,
+                trigger_variable=trigger_variable, trigger_edge=trigger_edge, trigger_level=trigger_level,
+                trigger_enabled=trigger_enabled, auto_start=auto_start, task_name=task_name,
+                record_condition=record_condition, comment=comment, samples=samples)
 
 
 @mcp.tool()
@@ -495,10 +545,29 @@ def trace_wait(trace: str, timeout_s: float = 30) -> Any:
 
 
 @mcp.tool()
-def trace_save(trace: str, max_rows: int = 500) -> Any:
-    """Stop the trace, export CSV and return value changes per variable (time_ms plus one column each)."""
-    res = call("trace_save", timeout=120, trace=trace)
-    return parse_csv(res["csv"], max_rows)
+def trace_status(trace: str) -> Any:
+    """Run state of a trace: running, online, logged_in, trigger state, packet state. Works after the
+    bridge or the IDE was restarted (it opens the trace editor if needed)."""
+    return call("trace_status", trace=trace)
+
+
+@mcp.tool()
+def trace_save(trace: str, max_rows: int = 500, mode: str = "changes", start_ms: Optional[int] = None,
+               end_ms: Optional[int] = None, variables: Optional[list[str]] = None, upload: bool = False,
+               csv_path: Optional[str] = None) -> Any:
+    """Stop the trace if it is running, export its CSV and return the data.
+    mode "changes" (default): only the rows where any value changed (time_ms plus one column per
+    variable). mode "samples": every sample. mode "csv": the raw export text. start_ms/end_ms cut a time
+    window and `variables` keeps only those columns. upload=True first pulls the recorded data from
+    the controller (for a trace recorded earlier or by auto start). csv_path also writes the CSV on the
+    IDE machine."""
+    res = call("trace_save", timeout=180, trace=trace, upload=upload, csv_path=csv_path)
+    if mode == "csv":
+        return {"path": res.get("path"), "csv": res["csv"]}
+    out = parse_csv(res["csv"], max_rows, mode, start_ms, end_ms, variables)
+    if res.get("path"):
+        out["path"] = res["path"]
+    return out
 
 
 # ---- HMI (visualizations)

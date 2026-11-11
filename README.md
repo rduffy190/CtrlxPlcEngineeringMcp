@@ -88,7 +88,7 @@ HMI: `build_hmi` (screen definition to `.export`, plus SVG previews), `import_vi
 
 PLCopenXML: `export_plcopen`, `import_plcopen`. Ladder: `ladder_check`, `ladder_import`, `ladder_export`.
 Online (the user logs in and downloads in the IDE themselves; `login` can fail on the download confirmation dialog): `login`, `logout`, `run_state`, `plc_start`, `plc_stop`, `read_var`, `write_var`.
-Trace: `trace_setup`, `trace_run`, `trace_stop`, `trace_wait`, `trace_save`.
+Trace: `list_traces`, `get_trace`, `create_trace`, `trace_setup`, `trace_run`, `trace_status`, `trace_stop`, `trace_wait`, `trace_save`.
 Escape hatch: `exec_script` (runs IronPython in the IDE; use `dir()` to explore the API).
 
 Object paths are `/`-separated names from the project root, for example
@@ -114,8 +114,11 @@ spelling (`Plc Logic` vs `PLC Logic`).
 
 ### Tracing
 
-Scripts cannot create a trace object (`trace.create` returns a stub and adds nothing). Add one
-once in the IDE: right-click the Application > Add Object > Trace. After that:
+`create_trace name="MyTrace"` adds an empty trace object (scripts cannot: `trace.create` returns a stub, so the
+bridge imports a blank trace from `server/templates/trace.template.native`). Adding one in the IDE (right-click the
+Application > Add Object > Trace) works too. `list_traces` and `get_trace` read what exists; `trace_setup` changes only the
+arguments you give (`variables`, `add_variables`, `remove_variables`, trigger, `trigger_enabled`, `auto_start`,
+`task_name`, `record_condition`, `comment`). Then:
 
     trace_setup  trace="Device/Plc Logic/Application/MyTrace"  samples=<ask the user>  variables=["PRG_Main.bEnable", ...]
     trace_run    app="Device/Plc Logic/Application"  trace=...     # downloads and starts
@@ -130,6 +133,10 @@ whenever the trace's variables or settings change.
 controller; the PLC program is untouched and the controller keeps running. On trace download the IDE
 shows a dialog that the user may have to acknowledge. `trace_run` waits for it, so tell the user to
 watch the IDE.
+
+`trace_save` takes `mode` (`changes`, `samples` for every sample, `csv` for the raw export), a `start_ms`/`end_ms` window,
+a `variables` filter and `upload=True` to pull the data from the controller first; `trace_status` shows whether it is
+running or has been downloaded. A trace level is a number; leave it out for a BOOL trigger.
 
 `trace_setup` also puts the variables in the trace's first diagram; without that they are recorded
 but not drawn. Variable names are relative to the application: no `Application.` prefix. With the prefix the

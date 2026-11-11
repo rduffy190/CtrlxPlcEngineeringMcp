@@ -130,7 +130,7 @@ def make_skills():
     d = tempfile.mkdtemp(prefix="skills")
     for skill, script, code in (
         ("ctrlx-engineer", "st_to_plcopenxml.py", """
-import sys
+import os, sys
 a = sys.argv[1:]
 out = a[a.index("-o") + 1]
 libs = [a[i + 1] for i, x in enumerate(a) if x == "--lib"]
@@ -139,8 +139,8 @@ if any("BAD" in open(s).read() for s in srcs):
     print("FB_A.st: network 1: unknown element", file=sys.stderr)
     sys.exit(2)
 if libs:
-    print("libs: " + ",".join(l.rsplit("/", 1)[-1] for l in libs), file=sys.stderr)
-open(out, "w").write("<project>" + ",".join(s.rsplit("/", 1)[-1] for s in srcs) + "</project>")
+    print("libs: " + ",".join(os.path.basename(l) for l in libs), file=sys.stderr)
+open(out, "w").write("<project>" + ",".join(os.path.basename(s) for s in srcs) + "</project>")
 """),
         ("codesys-lad", "ld_trace.py", """
 import sys
@@ -164,7 +164,8 @@ async def run():
                     "ladder_export", "create_dut", "create_gvl", "create_folder", "move_object", "delete_object", "build",
                     "messages", "login", "logout", "run_state", "plc_start", "plc_stop",
                     "read_var", "write_var", "trace_setup", "trace_run", "trace_stop", "trace_wait",
-                    "trace_save", "exec_script"}
+                    "trace_save", "exec_script", "list_traces", "get_trace", "create_trace",
+                    "trace_status", "list_io", "map_io", "add_task_call", "remove_task_call"}
         assert expected <= tools, f"missing tools: {expected - tools}"
 
         async def tool(tool_name, /, **a):
@@ -228,7 +229,8 @@ async def run():
         assert m == {"path": f"{APP}/02_Gapper/POUs/Motor"}, m
         names = [c.get_name() for c in app.get_children(False)]
         assert names == ["PLC_PRG", "ST_Axis", "02_Gapper"], names
-        tree = data(await tool("get_tree", path=f"{APP}/02_Gapper", depth=3))
+        res = await tool("get_tree", path=f"{APP}/02_Gapper", depth=3)
+        tree = [json.loads(c.text) for c in res.content]     # a list result arrives as one content item per entry
         assert [t["name"] for t in tree] == ["POUs", "Types"] and tree[0]["children"][0]["name"] == "Motor", tree
 
         b = data(await tool("build", app=APP))

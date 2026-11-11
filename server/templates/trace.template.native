@@ -1,0 +1,171 @@
+<ExportFile>
+  <StructuredView Guid="{d9b2b2cc-ea99-4c3b-aa42-1e5c49e65b84}">
+<Single xml:space="preserve" Type="{3daac5e4-660e-42e4-9cea-3711b98bfb63}" Method="IArchivable">
+  <Null Name="Profile" />
+  <List2 Name="EntryList">
+    <Single Type="{6198ad31-4b98-445c-927f-3258a0e82fe3}" Method="IArchivable">
+      <Single Name="IsRoot" Type="bool">True</Single>
+      <Single Name="MetaObject" Type="{81297157-7ec9-45ce-845e-84cab2b88ade}" Method="IArchivable">
+        <Single Name="Guid" Type="System.Guid">108578d3-6c14-4739-adb3-f26f5e9b1c1a</Single>
+        <Single Name="ParentGuid" Type="System.Guid">2b7323c0-cd65-4251-87fb-343fa4edcf92</Single>
+        <Single Name="Name" Type="string">Claude</Single>
+        <Dictionary Type="{2c41fa04-1834-41c1-816e-303c7aa2c05b}" Name="Properties" />
+        <Single Name="TypeGuid" Type="System.Guid">f7aa3620-8073-4c91-b6ec-86ed9eb60303</Single>
+        <Null Name="EmbeddedTypeGuids" />
+        <Single Name="Timestamp" Type="long">639298098224836857</Single>
+      </Single>
+      <Single Name="Object" Type="{f7aa3620-8073-4c91-b6ec-86ed9eb60303}" Method="IArchivable">
+        <Dictionary Type="System.Collections.Hashtable" Name="TraceDataConfig" />
+        <Dictionary Type="System.Collections.Hashtable" Name="TraceOutputConfig" />
+        <Single Name="TraceSettings" Type="{8aaaee37-d2e1-4e99-b58f-acd4f8bf698f}" Method="IArchivable">
+          <Single Name="AutoSave" Type="bool">False</Single>
+          <Null Name="AutoSaveFileName" />
+          <Single Name="RefreshDuration" Type="int">500</Single>
+          <Single Name="BufferPerVariable" Type="uint">10001</Single>
+          <Single Name="HorizontalOrder" Type="bool">True</Single>
+          <Single Name="OverrideRTSBufferSize" Type="bool">False</Single>
+        </Single>
+        <Null Name="RecordList" />
+        <Single Name="Record" Type="{988743cb-81f4-49a7-8a04-2490e2ab1c5e}" Method="IArchivable">
+          <Dictionary Type="System.Collections.Hashtable" Name="PlotLib" />
+          <Single Name="VariableList" Type="{adcdd50b-433c-4999-986a-b4c67e7333be}" Method="IArchivable">
+            <List Name="InnerList" Type="System.Collections.ArrayList" />
+          </Single>
+          <Single Name="TriggerVariable" Type="string"></Single>
+          <Single Name="TriggerEdge" Type="{33a32e6c-d512-4195-9e73-520baca05512}">None</Single>
+          <Single Name="TriggerLevel" Type="string"></Single>
+          <Single Name="TriggerPosition" Type="byte">51</Single>
+          <Single Name="TriggerFlags" Type="{7be0d640-5118-4d1b-bbfd-95754f90c80d}">Undefined</Single>
+          <Single Name="TaskName" Type="string"></Single>
+          <Single Name="BufferEntries" Type="uint">100</Single>
+          <Single Name="EveryNCycles" Type="uint">1</Single>
+          <Single Name="guidPOU" Type="System.Guid">cbec30a1-66ae-41ac-a84f-2e4a4e8cd0df</Single>
+          <Single Name="Comment" Type="string"></Single>
+          <Single Name="Condition" Type="string"></Single>
+          <Single Name="MicroSeconds" Type="bool">False</Single>
+          <Single Name="Autostart" Type="bool">False</Single>
+          <Single Name="GenerateVisuCode" Type="bool">False</Single>
+          <Single Name="Visible" Type="bool">True</Single>
+          <Single Name="Selected" Type="bool">False</Single>
+          <Single Name="RecordName" Type="string">Claude</Single>
+          <Single Name="PostTriggerSamples" Type="uint">51</Single>
+          <Single Name="Appearance" Type="{99dff181-10ad-4b60-af8a-66ab1d5eebe9}" Method="IArchivable">
+            <Single Name="tAxis" Type="{6ace1446-1a6b-4117-97c0-65c2081a8054}" Method="IArchivable">
+              <Single Name="Mode" Type="int">0</Single>
+              <Single Name="Min" Type="double">0</Single>
+              <Single Name="Max" Type="double">10000</Single>
+              <Single Name="Range" Type="double">10000</Single>
+              <Single Name="DrawDesc" Type="bool">False</Single>
+              <Single Name="Desc" Type="string"></Single>
+              <Single Name="Col" Type="int">-16777216</Single>
+              <Single Name="Font" Type="{3371a5fa-e13c-4960-9e27-0a2c6ba51cd5}" Method="IArchivable">
+                <Single Name="Name" Type="string">Arial</Single>
+                <Single Name="Size" Type="float">8</Single>
+                <Single Name="Flags" Type="uint">0</Single>
+              </Single>
+              <Single Name="Grid" Type="bool">True</Single>
+              <Single Name="GridCol" Type="int">-8355712</Single>
+              <Single Name="TickMarkFixedSpacing" Type="bool">False</Single>
+              <Single Name="TickMarkFixedDistance" Type="double">1000</Single>
+              <Single Name="TickMarkFixedSubdivisions" Type="int">1</Single>
+            </Single>
+            <Single Name="yAxisCommon" Type="{6ace1446-1a6b-4117-97c0-65c2081a8054}" Method="IArchivable">
+              <Single Name="Mode" Type="int">0</Single>
+              <Single Name="Min" Type="double">-12</Single>
+              <Single Name="Max" Type="double">12</Single>
+              <Single Name="Range" Type="double">24</Single>
+              <Single Name="DrawDesc" Type="bool">False</Single>
+              <Single Name="Desc" Type="string"></Single>
+              <Single Name="Col" Type="int">-16777216</Single>
+              <Single Name="Font" Type="{3371a5fa-e13c-4960-9e27-0a2c6ba51cd5}" Method="IArchivable">
+                <Single Name="Name" Type="string">Arial</Single>
+                <Single Name="Size" Type="float">8</Single>
+                <Single Name="Flags" Type="uint">0</Single>
+              </Single>
+              <Single Name="Grid" Type="bool">True</Single>
+              <Single Name="GridCol" Type="int">-8355712</Single>
+              <Single Name="TickMarkFixedSpacing" Type="bool">False</Single>
+              <Single Name="TickMarkFixedDistance" Type="double">1</Single>
+              <Single Name="TickMarkFixedSubdivisions" Type="int">1</Single>
+            </Single>
+            <Single Name="diagSettings" Type="{61889f9a-966b-4cce-8523-bdfa9a5ab097}" Method="IArchivable">
+              <Single Name="Col" Type="int">-1</Single>
+              <Single Name="ColSel" Type="int">-657956</Single>
+            </Single>
+          </Single>
+          <Single Name="WrittenWithVersionGE_V3420" Type="bool">True</Single>
+          <Single Name="WrittenWithVersionGE_V3510" Type="bool">True</Single>
+          <Single Name="TimeAxis" Type="{6ace1446-1a6b-4117-97c0-65c2081a8054}" Method="IArchivable">
+            <Single Name="Mode" Type="int">0</Single>
+            <Single Name="Min" Type="double">0</Single>
+            <Single Name="Max" Type="double">10000</Single>
+            <Single Name="Range" Type="double">10000</Single>
+            <Single Name="DrawDesc" Type="bool">False</Single>
+            <Single Name="Desc" Type="string"></Single>
+            <Single Name="Col" Type="int">-16777216</Single>
+            <Single Name="Font" Type="{3371a5fa-e13c-4960-9e27-0a2c6ba51cd5}" Method="IArchivable">
+              <Single Name="Name" Type="string">Arial</Single>
+              <Single Name="Size" Type="float">8</Single>
+              <Single Name="Flags" Type="uint">0</Single>
+            </Single>
+            <Single Name="Grid" Type="bool">True</Single>
+            <Single Name="GridCol" Type="int">-8355712</Single>
+            <Single Name="TickMarkFixedSpacing" Type="bool">False</Single>
+            <Single Name="TickMarkFixedDistance" Type="double">1000</Single>
+            <Single Name="TickMarkFixedSubdivisions" Type="int">1</Single>
+          </Single>
+          <Single Name="Diagrams" Type="{09c4e4de-82a7-4bc3-b8ac-0eed481c722d}" Method="IArchivable">
+            <List2 Name="Diagrams">
+              <Single Type="{528b663d-e04a-446a-80df-13e5dea35f57}" Method="IArchivable">
+                <Single Name="Appearance" Type="{0ebf0881-00e4-43f4-9e5d-c297518b153e}" Method="IArchivable">
+                  <Single Name="DiagramSettings" Type="{61889f9a-966b-4cce-8523-bdfa9a5ab097}" Method="IArchivable">
+                    <Single Name="Col" Type="int">-1</Single>
+                    <Single Name="ColSel" Type="int">-657956</Single>
+                  </Single>
+                  <Single Name="YAxis" Type="{6ace1446-1a6b-4117-97c0-65c2081a8054}" Method="IArchivable">
+                    <Single Name="Mode" Type="int">0</Single>
+                    <Single Name="Min" Type="double">-12</Single>
+                    <Single Name="Max" Type="double">12</Single>
+                    <Single Name="Range" Type="double">24</Single>
+                    <Single Name="DrawDesc" Type="bool">False</Single>
+                    <Single Name="Desc" Type="string"></Single>
+                    <Single Name="Col" Type="int">-16777216</Single>
+                    <Single Name="Font" Type="{3371a5fa-e13c-4960-9e27-0a2c6ba51cd5}" Method="IArchivable">
+                      <Single Name="Name" Type="string">Arial</Single>
+                      <Single Name="Size" Type="float">8</Single>
+                      <Single Name="Flags" Type="uint">0</Single>
+                    </Single>
+                    <Single Name="Grid" Type="bool">True</Single>
+                    <Single Name="GridCol" Type="int">-8355712</Single>
+                    <Single Name="TickMarkFixedSpacing" Type="bool">False</Single>
+                    <Single Name="TickMarkFixedDistance" Type="double">1</Single>
+                    <Single Name="TickMarkFixedSubdivisions" Type="int">1</Single>
+                  </Single>
+                </Single>
+                <Single Name="Variables" Type="{732a698e-182d-4c08-be90-b42c1a34ebae}" Method="IArchivable">
+                  <List2 Name="Variables" />
+                </Single>
+                <Single Name="Name" Type="string">Diagram 1</Single>
+                <Single Name="Visible" Type="bool">True</Single>
+                <Single Name="DiagramGuid" Type="System.Guid">5bdfd4cd-5e18-4ca0-a254-2f5b42feb30a</Single>
+              </Single>
+            </List2>
+          </Single>
+        </Single>
+        <Single Name="AppGuid" Type="System.Guid">d1c3a563-d919-4bdf-a88c-336a8b7e2c5f</Single>
+        <Single Name="DownloadGuid" Type="System.Guid">068d193c-0c09-4049-b087-d27023d489a5</Single>
+        <Single Name="ExitGuid" Type="System.Guid">1494692b-6594-4abd-bda2-14512eac2e9c</Single>
+        <Dictionary Type="System.Collections.Hashtable" Name="VisuCodeGuids" />
+      </Single>
+      <Single Name="ParentSVNodeGuid" Type="System.Guid">2b7323c0-cd65-4251-87fb-343fa4edcf92</Single>
+      <Array Name="Path" Type="string">
+        <Single Type="string">Device</Single>
+        <Single Type="string">PLC Logic</Single>
+        <Single Type="string">Application</Single>
+      </Array>
+      <Single Name="Index" Type="int">-1</Single>
+    </Single>
+  </List2>
+  <Null Name="ProfileName" />
+</Single>  </StructuredView>
+</ExportFile>

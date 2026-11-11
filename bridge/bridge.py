@@ -544,22 +544,99 @@ def h_write_var(a):
 
 # ---- trace
 
-def h_trace_setup(a):
-    """Configure an existing trace object. Trace.create does not work in this ScriptEngine, so the
-    trace is added in the IDE (Add Object > Trace). Variable names are relative to the
-    application (no 'Application.' prefix; with it the download silently does nothing)."""
-    t = _find(a["trace"])
+def _trace_obj(path):
+    t = _find(path)
     if not hasattr(t, "variable_list"):
-        raise ValueError("'%s' is not a trace object; add one in the IDE (Add Object > Trace)" % a["trace"])
+        raise ValueError("'%s' is not a trace object (see list_traces / create_trace)" % path)
+    return t
+
+
+def _plain(v):
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return str(v)
+
+
+_TRACE_ATTRS = ("comment", "every_n_cycles", "resolution", "trigger_enabled", "trigger_variable",
+                "trigger_edge", "trigger_level", "post_trigger_samples", "auto_start", "task_name",
+                "record_condition")
+
+
+def _trace_config(t):
+    """Everything a trace holds: settings, recorded variables and which diagram draws what."""
+    cfg = {}
+    for n in _TRACE_ATTRS:
+        try:
+            cfg[n] = _plain(getattr(t, n))
+        except Exception:
+            pass
+    cfg["variables"] = [str(v.variable_name) for v in t.variable_list]
+    # a diagram variable has no name of its own (only .visible), so report how many each draws
+    cfg["diagrams"] = [{"name": str(d.name), "variables_drawn": len(list(d.variables))} for d in t.diagrams]
+    return cfg
+
+
+def _norm_var(v):
+    return v[len("Application."):] if v.startswith("Application.") else v
+
+
+def h_list_traces(a):
+    """All trace objects under a node (default the application), with a short summary."""
+    root = _find(a.get("app") or _APP_PATH)
+    out = []
+
+    def walk(node, path):
+        for c in node.get_children(False):
+            cp = path + "/" + c.get_name()
+            if hasattr(c, "variable_list"):
+                out.append({"path": cp, "variables": [str(v.variable_name) for v in c.variable_list],
+                            "samples": _plain(getattr(c, "post_trigger_samples", None)),
+                            "trigger_enabled": _plain(getattr(c, "trigger_enabled", None)),
+                            "trigger_variable": _plain(getattr(c, "trigger_variable", None))})
+            walk(c, cp)
+    walk(root, a.get("app") or _APP_PATH)
+    return out
+
+
+def h_get_trace(a):
+    """Read a trace's configuration (no changes, no editor opened) plus its run state if a
+    trace editor is open on it."""
+    t = _trace_obj(a["trace"])
+    res = _trace_config(t)
+    res["trace"] = a["trace"]
+    ed = _editors.get(a["trace"])
+    if ed is not None:
+        res["run"] = _editor_state(ed)
+    return res
+
+
+def h_trace_setup(a):
+    """Configure an existing trace object (create one with create_trace or in the IDE: Add Object >
+    Trace). Variable names are relative to the application (no 'Application.' prefix; with it the
+    download silently does nothing). Every argument is optional; only what is given changes."""
+    t = _trace_obj(a["trace"])
     if a.get("variables") is not None:
         t.variable_list.clear()
         for v in a["variables"]:
-            if v.startswith("Application."):
-                v = v[len("Application."):]
-            t.add_trace_variable(v)
-        # variables in the record list are not drawn until they are in a diagram
+            t.add_trace_variable(_norm_var(v))
+    if a.get("remove_variables"):
+        gone = [_norm_var(v) for v in a["remove_variables"]]
+        for item in list(t.variable_list):
+            if str(item.variable_name) in gone:
+                t.variable_list.remove(item)
+    if a.get("add_variables"):
+        have = [str(v.variable_name) for v in t.variable_list]
+        for v in a["add_variables"]:
+            v = _norm_var(v)
+            if v not in have:
+                t.add_trace_variable(v)
+                have.append(v)
+    if a.get("variables") is not None or a.get("add_variables") or a.get("remove_variables"):
+        # variables in the record list are not drawn until they are in a diagram, and a diagram
+        # variable cannot be matched to a record variable, so rebuild the first diagram from the list
         diagrams = list(t.diagrams)
         d = diagrams[0] if diagrams else t.diagrams.add()
+        d.variables.clear()
         for v in t.variable_list:
             d.add_diagram_variable(v, True)
     if a.get("every_n_cycles"):
@@ -569,12 +646,74 @@ def h_trace_setup(a):
     if a.get("trigger_variable"):
         t.trigger_enabled = True
         t.trigger_variable = a["trigger_variable"]
-        t.trigger_edge = _enum(TriggerEdge, a.get("trigger_edge", "Positive"))
+        t.trigger_edge = _enum(TriggerEdge, a.get("trigger_edge") or "Positive")
         if a.get("trigger_level") is not None:
             t.trigger_level = str(a["trigger_level"])
+    else:
+        if a.get("trigger_level") is not None:
+            t.trigger_level = str(a["trigger_level"])
+        if a.get("trigger_edge"):
+            t.trigger_edge = _enum(TriggerEdge, a["trigger_edge"])
+    if a.get("trigger_enabled") is not None:
+        t.trigger_enabled = bool(a["trigger_enabled"])
     if a.get("samples"):
         t.post_trigger_samples = int(a["samples"])
-    return {"trace": a["trace"], "variables": [str(v.variable_name) for v in t.variable_list]}
+    if a.get("comment") is not None:
+        t.comment = a["comment"]
+    if a.get("auto_start") is not None:
+        t.auto_start = bool(a["auto_start"])
+    if a.get("task_name") is not None:
+        t.task_name = a["task_name"]
+    if a.get("record_condition") is not None:
+        t.record_condition = a["record_condition"]
+    res = _trace_config(t)
+    res["trace"] = a["trace"]
+    return res
+
+
+def h_trace_create(a):
+    """Create a trace object by importing the native XML template the server sends (an export of
+    a blank trace). Scripts cannot create one directly (trace.create returns a stub). The ids in
+    the template are replaced: a fresh object id, the parent's ids and the application's id.
+    replace=True removes a trace of the same name first."""
+    import System
+    parent_path = a.get("parent") or _APP_PATH
+    parent = _find(parent_path)
+    app = _find(_APP_PATH)
+    name = a["name"]
+    for c in parent.get_children(False):
+        if c.get_name() == name:
+            if not a.get("replace"):
+                raise ValueError("'%s' already exists; use replace or another name" % name)
+            c.remove()
+
+    def guid():
+        return str(System.Guid.NewGuid())
+
+    def setv(x, tag, value, count=0):
+        pat = r'(<Single Name="%s" Type="[^"]*">)[^<]*(</Single>)' % tag
+        return re.sub(pat, lambda m: m.group(1) + value + m.group(2), x, count)
+
+    x = a["xml"]
+    x = setv(x, "Guid", guid(), 1)
+    x = setv(x, "ParentGuid", str(parent.guid))
+    x = setv(x, "ParentSVNodeGuid", str(parent.guid))
+    x = setv(x, "AppGuid", str(app.guid))
+    for tag in ("DownloadGuid", "ExitGuid", "DiagramGuid"):
+        x = setv(x, tag, guid())
+    x = setv(x, "Name", name, 1)
+    x = setv(x, "RecordName", name)
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_trace.native")
+    with open(tmp, "wb") as f:
+        f.write(x.encode("utf-8"))
+    try:
+        parent.import_native(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    path = parent_path + "/" + name
+    t = _trace_obj(path)
+    return {"trace": path, "variables": [str(v.variable_name) for v in t.variable_list]}
 
 
 def _wait(cond, seconds):
@@ -619,8 +758,30 @@ def h_trace_stop(a):
 def _editor(path):
     ed = _editors.get(path)
     if ed is None:
-        raise RuntimeError("trace '%s' not running; call trace_run first" % path)
+        ed = _trace_obj(path).open_editor()
+        _editors[path] = ed
     return ed
+
+
+def _editor_state(ed):
+    def get(fn):
+        # before the first download the trigger and packet state raise "not downloaded to the device"
+        try:
+            return fn()
+        except Exception:
+            return None
+    st = {"running": get(lambda: bool(ed.is_running)), "online": get(lambda: bool(ed.is_online)),
+          "logged_in": get(lambda: bool(ed.is_logged_in)),
+          "trigger": get(lambda: str(ed.get_trigger_state())), "packet": get(lambda: str(ed.get_packet_state()))}
+    if st["trigger"] is None and st["packet"] is None:
+        st["note"] = "the trace has not been downloaded to the device yet (trace_run)"
+    return st
+
+
+def h_trace_status(a):
+    """Run state of a trace: running, online, trigger state and packet state. Opens the trace
+    editor if it is not open yet (after a bridge restart)."""
+    return _editor_state(_editor(a["trace"]))
 
 
 def h_trace_state(a):
@@ -645,6 +806,8 @@ def h_trace_save(a):
     ed = _editor(a["trace"])
     if ed.is_running:       # a trace that filled its buffer has stopped itself
         ed.stop()
+    if a.get("upload"):
+        ed.upload_to_device_trace()
     path = a.get("csv_path")
     tmp = None
     if not path:
