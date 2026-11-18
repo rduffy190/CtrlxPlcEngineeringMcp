@@ -1,0 +1,665 @@
+"""MCP server for ctrlX PLC Engineering. Proxies tool calls to bridge/bridge.py.
+
+Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required unless
+a .ctrlx_token file exists in the project root or scripts/, which is how Windows is set up),
+CTRLX_SKILLS_DIR (~/.claude/skills; holds ctrlx-engineer and codesys-lad, used by the ladder tools).
+"""
+import csv
+import io
+import json
+import re
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+from typing import Any, Optional
+
+from mcp.server.fastmcp import FastMCP
+
+HOST = os.environ.get("CTRLX_BRIDGE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("CTRLX_BRIDGE_PORT", "8765"))
+
+
+def _load_token() -> str:
+    tok = os.environ.get("CTRLX_MCP_TOKEN", "").strip()
+    if tok and not tok.startswith("${"):  # an unexpanded ${VAR} from .mcp.json is not a token
+        return tok
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.path.join(root, ".ctrlx_token"), os.path.join(root, "scripts", ".ctrlx_token")):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                tok = f.read().strip()
+        except OSError:
+            continue
+        if tok:
+            return tok
+    return ""
+
+
+TOKEN = _load_token()
+SKILLS = os.environ.get("CTRLX_SKILLS_DIR", os.path.expanduser("~/.claude/skills"))
+
+mcp = FastMCP("ctrlx-engineering")
+
+
+class BridgeError(RuntimeError):
+    pass
+
+
+class BridgeUnreachable(BridgeError):
+    pass
+
+
+# On Windows with the bridge on this PC, a call that finds no bridge starts scripts\start_bridge.bat
+# (the IDE with the bridge loaded) and waits for it. CTRLX_AUTOSTART=0 turns this off.
+AUTOSTART = os.environ.get("CTRLX_AUTOSTART", "1") == "1" and os.name == "nt" and HOST in ("127.0.0.1", "localhost")
+_autostart_tried = 0.0
+
+
+def _autostart() -> bool:
+    """Start the IDE with the bridge and wait until it answers. At most one attempt per 5 minutes."""
+    import time
+    global _autostart_tried
+    bat = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "start_bridge.bat")
+    if not AUTOSTART or not os.path.exists(bat) or time.time() - _autostart_tried < 300:
+        return False
+    _autostart_tried = time.time()
+    # stdin from NUL so the script's closing `pause` returns at once.
+    subprocess.Popen(["cmd.exe", "/c", bat], cwd=os.path.dirname(bat), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            _rpc(PORT, "ping", 30, {})
+            return True
+        except BridgeUnreachable:
+            continue
+        except BridgeError:
+            return True  # it answers, even if with an error
+    return False
+
+
+def call(cmd: str, timeout: float = 60, **args: Any) -> Any:
+    """One request/response round trip to the bridge."""
+    try:
+        return _rpc(PORT, cmd, timeout, args)
+    except BridgeUnreachable:
+        if not _autostart():
+            raise
+        return _rpc(PORT, cmd, timeout, args)
+
+
+def _rpc(port: int, cmd: str, timeout: float, args: dict) -> Any:
+    req = json.dumps({"id": 1, "token": TOKEN, "cmd": cmd, "args": args}).encode() + b"\n"
+    try:
+        with socket.create_connection((HOST, port), timeout=10) as s:
+            s.sendall(req)
+            s.settimeout(timeout)
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+    except OSError as e:
+        raise BridgeUnreachable(f"bridge unreachable at {HOST}:{port}: {e}") from e
+    resp = json.loads(buf)
+    if not resp.get("ok"):
+        raise BridgeError(resp.get("error", "unknown error") + "\n" + resp.get("traceback", ""))
+    return resp.get("result")
+
+
+def parse_csv(text: str, max_rows: int, mode: str = "changes", start_ms: Optional[int] = None,
+              end_ms: Optional[int] = None, variables: Optional[list[str]] = None) -> dict:
+    """Parse a ctrlX trace export: a key;value header, then per variable `N.Variable; name` and
+    `N.Data;` followed by `; time_ms; value` rows. mode "changes" (default) returns only the rows
+    where any value changed; "samples" returns every sample time. start_ms/end_ms cut a time
+    window and `variables` keeps only those columns (matched by exact name or by suffix)."""
+    names: dict[int, str] = {}
+    series: dict[int, dict[int, str]] = {}
+    cur = None
+    meta: dict[str, str] = {}
+    for line in text.lstrip("\ufeff").splitlines():
+        m = re.match(r"(\d+)\.Variable;\s*(.+)", line)
+        if m:
+            names[int(m.group(1))] = m.group(2).strip()
+            continue
+        m = re.match(r"(\d+)\.Data;", line)
+        if m:
+            cur = int(m.group(1))
+            series[cur] = {}
+            continue
+        parts = [p.strip() for p in line.split(";")]
+        if cur is not None and line.startswith(";") and len(parts) >= 3 and parts[1].lstrip("-").isdigit():
+            series[cur][int(parts[1])] = parts[2]
+        elif cur is None and len(parts) == 2 and parts[0] in ("Name", "IecTaskName", "EveryNCycles"):
+            meta[parts[0]] = parts[1]
+    ids = sorted(series)
+    if variables:
+        want = [v.removeprefix("Application.") for v in variables]
+        ids = [k for k in ids if any(names.get(k, "") == w or names.get(k, "").endswith("." + w) for w in want)]
+        if not ids:
+            raise BridgeError("none of %s is in the trace (it has: %s)" % (variables, sorted(names.values())))
+    times = sorted({t for k in ids for t in series[k]})
+    rows, prev = [], None
+    for t in times:
+        row = [series[k].get(t, prev[i] if prev else "") for i, k in enumerate(ids)]
+        if mode == "samples" or row != prev:
+            rows.append([t] + row)
+        prev = row
+    if start_ms is not None:
+        rows = [r for r in rows if r[0] >= start_ms]
+    if end_ms is not None:
+        rows = [r for r in rows if r[0] <= end_ms]
+    key = "samples_rows" if mode == "samples" else "changes"
+    return {"meta": meta, "columns": ["time_ms"] + [names.get(k, str(k)) for k in ids],
+            "samples": len(times), key: rows[:max_rows], "truncated": len(rows) > max_rows,
+            "first_ms": times[0] if times else None, "last_ms": times[-1] if times else None}
+
+
+# ---- project
+
+@mcp.tool()
+def ping() -> Any:
+    """Check the bridge is reachable; returns the open project path."""
+    return call("ping")
+
+
+@mcp.tool()
+def open_project(path: str) -> Any:
+    """Open a .project file in PLC Engineering."""
+    return call("open_project", timeout=300, path=path)
+
+
+@mcp.tool()
+def save_project() -> Any:
+    """Save the open project."""
+    return call("save_project")
+
+
+@mcp.tool()
+def get_tree(path: str = "", depth: int = 3) -> Any:
+    """List the project tree. Paths are '/'-separated names, e.g. 'Device/PLC Logic/Application'."""
+    return call("get_tree", path=path, depth=depth)
+
+
+@mcp.tool()
+def get_pou(path: str) -> Any:
+    """Read declaration and implementation text of a POU/GVL/DUT."""
+    return call("get_pou", path=path)
+
+
+@mcp.tool()
+def set_pou(path: str, declaration: Optional[str] = None, implementation: Optional[str] = None) -> Any:
+    """Replace declaration and/or implementation text of an existing object."""
+    return call("set_pou", path=path, declaration=declaration, implementation=implementation)
+
+
+@mcp.tool()
+def create_pou(parent: str, name: str, kind: str = "Program", language: str = "st",
+               return_type: Optional[str] = None) -> Any:
+    """Create a POU under parent. kind: Program|FunctionBlock|Function. language: st|ld|fbd...
+    A Function needs return_type (e.g. "TIME"). The application must be logged out: the IDE
+    refuses to add objects while logged in. Only the declaration of a graphical POU (ld, fbd,
+    sfc) can be set as text; its body cannot. Build ladder as PLCopenXML (codesys-lad skill)
+    and use import_plcopen."""
+    return call("create_pou", parent=parent, name=name, kind=kind, language=language,
+                return_type=return_type)
+
+
+@mcp.tool()
+def export_plcopen(paths: list[str], recursive: bool = True) -> str:
+    """Export objects as PLCopenXML and return the XML text. Read-only.
+    paths are object paths such as "Device/Plc Logic/Application/PRG_Main". Works for ST and
+    graphical POUs, so use it to read a ladder POU or to back up before an import."""
+    return call("export_plcopen", paths=paths, recursive=recursive)["xml"]
+
+
+@mcp.tool()
+def import_plcopen(xml: Optional[str] = None, file: Optional[str] = None,
+                   parent: str = "Device/Plc Logic/Application",
+                   conflict: str = "Replace") -> Any:
+    """Import PLCopenXML into parent (the application). Give the XML text in xml, or a path on
+    the Windows machine in file. The text route needs no shared folder: build the XML here with
+    ctrlx-engineer's st_to_plcopenxml.py (ladder via the codesys-lad skill) and pass it in.
+    conflict: Replace|Copy|Skip decides what happens to objects that already exist. Replace
+    overwrites them, so confirm with the user first and export a backup. The application must
+    be logged out (the IDE refuses to add objects while logged in); a build follows."""
+    if (xml is None) == (file is None):
+        raise ValueError("give exactly one of xml or file")
+    return call("import_plcopen", xml=xml, file=file, parent=parent, conflict=conflict)
+
+
+def _skill_script(skill: str, script: str) -> str:
+    path = os.path.join(SKILLS, skill, "scripts", script)
+    if not os.path.isfile(path):
+        raise BridgeError(f"{path} not found: install the ctrlx-engineer and codesys-lad skills "
+                          "side by side in ~/.claude/skills, or set CTRLX_SKILLS_DIR")
+    return path
+
+
+def _run_script(args: list[str], timeout: float = 120) -> tuple[int, str]:
+    # The skills may be symlinks: ctrlx-engineer then resolves to its real folder and cannot find
+    # codesys-lad next to it. Put the ladder compiler on the path explicitly.
+    env = dict(os.environ)
+    lad = os.path.join(SKILLS, "codesys-lad", "scripts")
+    env["PYTHONPATH"] = lad + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    # stdin from NUL: a child that inherits the MCP server's stdio pipe can hang on Windows
+    p = subprocess.run([sys.executable, *args], capture_output=True, text=True, timeout=timeout, env=env,
+                       stdin=subprocess.DEVNULL)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def _write_sources(files: dict[str, str], folder: str) -> list[str]:
+    paths = []
+    for name, text in files.items():
+        base = os.path.basename(name)
+        if base != name or not base.endswith(".st"):
+            raise ValueError(f"'{name}': give a plain file name ending in .st (a GVL is named after its file)")
+        path = os.path.join(folder, base)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        paths.append(path)
+    return paths
+
+
+def _trace(xml_path: str) -> str:
+    """Readable form of the ladder bodies in an XML file (ld_trace.py: each output as a boolean expression)."""
+    rc, out = _run_script([_skill_script("codesys-lad", "ld_trace.py"), xml_path])
+    return out if rc == 0 else f"(ld_trace failed)\n{out}"
+
+
+def _compile(sources: dict[str, str], libs: Optional[dict[str, str]], folder: str) -> dict:
+    """Build PLCopenXML from .st sources with ctrlx-engineer's converter. Raises on a source error."""
+    src = _write_sources(sources, folder)
+    args = [_skill_script("ctrlx-engineer", "st_to_plcopenxml.py"), *src, "-o", os.path.join(folder, "Project.xml")]
+    if libs:
+        libdir = os.path.join(folder, "lib")
+        os.makedirs(libdir)
+        for lib in _write_sources(libs, libdir):
+            args += ["--lib", lib]
+    rc, out = _run_script(args)
+    if rc != 0:
+        raise BridgeError(f"ladder/ST compile failed:\n{out}")
+    with open(os.path.join(folder, "Project.xml"), encoding="utf-8-sig") as f:
+        xml = f.read()
+    warnings = "\n".join(l for l in out.splitlines() if not l.startswith("Wrote "))
+    return {"xml": xml, "warnings": warnings, "trace": _trace(os.path.join(folder, "Project.xml"))}
+
+
+@mcp.tool()
+def ladder_check(sources: dict[str, str], libs: Optional[dict[str, str]] = None) -> dict:
+    """Compile ladder (and ST) source to PLCopenXML without touching the IDE, and read it back.
+    sources maps a file name ending in .st to its text, in the form the codesys-lad skill
+    describes: a POU whose body starts with NETWORK is ladder; a GVL is named after its file;
+    DUTs and ST POUs can be included. libs holds declaration files for library POUs the rungs
+    call. Returns the converter's warnings and `trace`: every ladder output written as a boolean
+    expression, per network. Check it against the intent before importing. A source error raises.
+    Needs the ctrlx-engineer and codesys-lad skills (see CTRLX_SKILLS_DIR)."""
+    with tempfile.TemporaryDirectory() as d:
+        r = _compile(sources, libs, d)
+    return {"warnings": r["warnings"], "trace": r["trace"]}
+
+
+@mcp.tool()
+def ladder_import(sources: dict[str, str], libs: Optional[dict[str, str]] = None,
+                  parent: str = "Device/Plc Logic/Application", conflict: str = "Replace") -> dict:
+    """Compile ladder/ST source (as ladder_check) and import it into the application in one step.
+    Objects that already exist are handled by `conflict` (Replace|Copy|Skip); Replace overwrites
+    them, so confirm with the user and keep an export_plcopen backup. The application must be
+    logged out (the IDE refuses to add objects while logged in). Returns the warnings and the
+    ladder readback; then run `build`. Nothing is imported if the source does not compile."""
+    with tempfile.TemporaryDirectory() as d:
+        r = _compile(sources, libs, d)
+    call("import_plcopen", timeout=300, xml=r["xml"], file=None, parent=parent, conflict=conflict)
+    return {"imported": True, "warnings": r["warnings"], "trace": r["trace"]}
+
+
+@mcp.tool()
+def ladder_export(paths: list[str], include_xml: bool = False) -> dict:
+    """Export objects from the IDE and read the ladder back. Read-only.
+    Returns `trace`: every ladder output as a boolean expression, per network, which is the form
+    to analyse or review ladder in. ST bodies are not in it (use get_pou). include_xml adds the
+    raw PLCopenXML (large) for a backup or for comparing with ld_diff.py."""
+    xml = call("export_plcopen", paths=paths, recursive=True)["xml"]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "export.xml")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(xml)
+        r = {"trace": _trace(path)}
+    if include_xml:
+        r["xml"] = xml
+    return r
+
+
+@mcp.tool()
+def add_task_call(program: str, task: str = "Device/Plc Logic/Application/Task Configuration/MainTask") -> Any:
+    """Make a task call a program (a PRG in the application), so the program actually runs.
+    A program that no task calls never executes. Does nothing if the task already calls it.
+    The scripting engine has no call for this, so the bridge re-imports the task: the IDE may
+    show a dialog that the user must acknowledge (this call waits for it, up to 5 minutes), so
+    tell the user to watch the IDE. The application should be logged out."""
+    return call("add_task_call", timeout=300, task=task, program=program)
+
+
+@mcp.tool()
+def remove_task_call(program: str, task: str = "Device/Plc Logic/Application/Task Configuration/MainTask") -> Any:
+    """Stop a task calling a program (the program itself stays). No dialog. Do this before
+    deleting a program that a task calls."""
+    return call("remove_task_call", task=task, program=program)
+
+
+@mcp.tool()
+def list_io(device: str) -> Any:
+    """List the I/O channels of a device card with direction (Input/Output), bit size and the
+    variable each is mapped to (null = unmapped). device is the object path, e.g.
+    "Device/Realtime_Data/ethercat_master_instances_ethercatmaster/XI110116"; use get_tree to find cards."""
+    return call("list_io", device=device)
+
+
+@mcp.tool()
+def map_io(device: str, mappings: list[dict], app_name: str = "Application") -> Any:
+    """Map, remap or unmap I/O channels of a device card to application variables.
+    mappings: [{"channel": 1, "variable": "GVL_IO.bDI_Start"}, ...]. channel is the number or the
+    parameter name; a variable of null or "" unmaps the channel. A variable without the
+    application name in front gets "<app_name>." added (the IDE needs it). The variable must exist
+    and be compatible with the channel (BOOL for a 1-bit channel). Offline edit: the controller
+    only uses it after the next download/online change, and confirm that with the user. Run
+    build afterwards, then check list_io."""
+    return call("map_io", device=device, mappings=mappings, app_name=app_name)
+
+
+@mcp.tool()
+def create_dut(parent: str, name: str) -> Any:
+    """Create a DUT under parent."""
+    return call("create_dut", parent=parent, name=name)
+
+
+@mcp.tool()
+def create_gvl(parent: str, name: str) -> Any:
+    """Create a global variable list under parent."""
+    return call("create_gvl", parent=parent, name=name)
+
+
+@mcp.tool()
+def create_folder(parent: str, name: str) -> Any:
+    """Create a folder under parent. name may be a path such as '02_Gapper/POUs': every missing level is created,
+    existing ones are reused (safe to repeat). Folders only group objects in the tree: names and code are unchanged.
+    The application should be logged out. Returns the full path and which levels were created."""
+    return call("create_folder", parent=parent, name=name)
+
+
+@mcp.tool()
+def move_object(path: str, dest: str) -> Any:
+    """Move an object (POU, DUT, GVL or folder) into the folder dest, e.g. path 'Device/Plc Logic/Application/FB_Pump',
+    dest 'Device/Plc Logic/Application/02_Gapper/POUs'. The name stays the same, so code, task calls and
+    references keep working. The application must be logged out (objects cannot be moved while online)."""
+    return call("move_object", path=path, dest=dest)
+
+
+@mcp.tool()
+def delete_object(path: str) -> Any:
+    """Delete a project object. Irreversible until the project is reloaded without saving."""
+    return call("delete", path=path)
+
+
+@mcp.tool()
+def build(app: Optional[str] = None) -> Any:
+    """Build application `app` (default: the active one) and return error count plus messages."""
+    return call("build", timeout=600, **({"app": app} if app else {}))
+
+
+@mcp.tool()
+def messages() -> Any:
+    """Return the current message store (build/compile messages)."""
+    return call("messages")
+
+
+# ---- online
+
+@mcp.tool()
+def login(app: str, download: bool = False, change: str = "Try") -> Any:
+    """NOTE: the user must log in (and download) themselves in the IDE: the download needs a confirmation
+    dialog that a script cannot answer, so this call can fail with just "Login failed...". Ask the user to
+    log in, then check run_state.
+
+    Log in to the application at path `app`. ALWAYS ask the user how to download the application before
+    calling; an application download can stop it and reset its variables (a trace download is separate
+    and harmless, see trace_run).
+
+    `change` is the IDE's online-change option: Try (online change, the default), Force, Keep or
+    Never. Never STOPS a running controller when logging in; use Try to attach to a running
+    application. `download` is passed to the IDE as "delete foreign applications" on the controller
+    (needs extra rights); leave it False unless the user asks."""
+    return call("login", timeout=300, app=app, download=download, change=change)
+
+
+@mcp.tool()
+def logout(app: str) -> Any:
+    """Log out of the application."""
+    return call("logout", app=app)
+
+
+@mcp.tool()
+def run_state(app: str) -> Any:
+    """Application run state and login status."""
+    return call("run_state", app=app)
+
+
+@mcp.tool()
+def plc_start(app: str) -> Any:
+    """Start the application on the controller."""
+    return call("plc_start", app=app)
+
+
+@mcp.tool()
+def plc_stop(app: str) -> Any:
+    """Stop the application on the controller."""
+    return call("plc_stop", app=app)
+
+
+@mcp.tool()
+def read_var(app: str, names: list[str]) -> Any:
+    """Read online variables, e.g. ['PLC_PRG.counter']."""
+    return call("read_var", app=app, names=names)
+
+
+@mcp.tool()
+def write_var(app: str, values: dict[str, Any]) -> Any:
+    """Write online variables (name -> value). Affects a running machine; confirm first."""
+    return call("write_var", app=app, values=values)
+
+
+# ---- trace
+
+@mcp.tool()
+def list_traces(app: str = "Device/Plc Logic/Application") -> Any:
+    """List the trace objects in the application: path, recorded variables, samples and trigger."""
+    return call("list_traces", app=app)
+
+
+@mcp.tool()
+def get_trace(trace: str) -> Any:
+    """Read a trace's configuration without changing it: recorded variables, how many variables each
+    diagram draws, every_n_cycles, resolution, trigger (enabled, variable, edge, level), post-trigger
+    samples, auto_start, task_name, record_condition, comment, plus run state if it was started."""
+    return call("get_trace", trace=trace)
+
+
+@mcp.tool()
+def create_trace(name: str, parent: str = "Device/Plc Logic/Application", replace: bool = False,
+                 from_trace: Optional[str] = None) -> Any:
+    """Create an empty trace object under parent (the application by default). Scripts cannot do this
+    directly, so the bridge copies a trace that is already in the project (`from_trace`, or the first
+    one) and clears it. A project with no trace needs one added in the IDE once (Add Object > Trace).
+    Configure it with trace_setup. Not saved: call save_project. To remove a trace use delete_object.
+    replace=True overwrites a trace of the same name (confirm with the user first)."""
+    return call("trace_create", timeout=120, name=name, parent=parent, replace=replace, from_trace=from_trace)
+
+
+@mcp.tool()
+def trace_setup(trace: str, samples: Optional[int] = None, variables: Optional[list[str]] = None,
+                add_variables: Optional[list[str]] = None, remove_variables: Optional[list[str]] = None,
+                every_n_cycles: Optional[int] = None, resolution: Optional[str] = None,
+                trigger_variable: Optional[str] = None, trigger_edge: Optional[str] = None,
+                trigger_level: Optional[float] = None, trigger_enabled: Optional[bool] = None,
+                auto_start: Optional[bool] = None, task_name: Optional[str] = None,
+                record_condition: Optional[str] = None, comment: Optional[str] = None) -> Any:
+    """Configure a trace object (create_trace, or add one in the IDE). Only the arguments you give change;
+    the full configuration comes back. `variables` replaces the recorded list, `add_variables` and
+    `remove_variables` change it a little. ALWAYS ask the user how many `samples` (post-trigger) the trace
+    should use before setting it; never pick a number yourself. Variables are relative to the application,
+    e.g. 'PRG_Main.bEnable'. A trigger_variable switches the trigger on (edge Positive by default);
+    trigger_enabled=False turns it off. Download again (trace_run) after changing anything."""
+    return call("trace_setup", trace=trace, variables=variables, add_variables=add_variables,
+                remove_variables=remove_variables, every_n_cycles=every_n_cycles, resolution=resolution,
+                trigger_variable=trigger_variable, trigger_edge=trigger_edge, trigger_level=trigger_level,
+                trigger_enabled=trigger_enabled, auto_start=auto_start, task_name=task_name,
+                record_condition=record_condition, comment=comment, samples=samples)
+
+
+@mcp.tool()
+def trace_run(app: str, trace: str, download: bool = True) -> Any:
+    """Start the trace at path `trace` (logs in with online change if needed). The trace download is
+    NOT an application download: with download=True only the trace configuration is sent to the
+    controller; the PLC program is untouched and the controller is not stopped. The IDE may ask the
+    user to acknowledge that trace download in a dialog, so tell the user and wait. With
+    download=False the trace already on the controller is re-armed and started again (use it for
+    repeat runs when the trace's variables and settings have not changed)."""
+    return call("trace_run", timeout=600, app=app, trace=trace, download=download)
+
+
+@mcp.tool()
+def trace_stop(trace: str) -> Any:
+    """Stop the trace if it is still running (it stops itself when its buffer is full)."""
+    return call("trace_stop", trace=trace)
+
+
+@mcp.tool()
+def trace_wait(trace: str, timeout_s: float = 30) -> Any:
+    """Wait for the trigger. Returns {triggered, state}."""
+    return call("trace_wait", timeout=timeout_s + 30, trace=trace, timeout_s=timeout_s)
+
+
+@mcp.tool()
+def trace_status(trace: str) -> Any:
+    """Run state of a trace: running, online, logged_in, trigger state, packet state. Works after the
+    bridge or the IDE was restarted (it opens the trace editor if needed)."""
+    return call("trace_status", trace=trace)
+
+
+@mcp.tool()
+def trace_save(trace: str, max_rows: int = 500, mode: str = "changes", start_ms: Optional[int] = None,
+               end_ms: Optional[int] = None, variables: Optional[list[str]] = None, upload: bool = False,
+               csv_path: Optional[str] = None) -> Any:
+    """Stop the trace if it is running, export its CSV and return the data.
+    mode "changes" (default): only the rows where any value changed (time_ms plus one column per
+    variable). mode "samples": every sample. mode "csv": the raw export text. start_ms/end_ms cut a time
+    window and `variables` keeps only those columns. upload=True first pulls the recorded data from
+    the controller (for a trace recorded earlier or by auto start). csv_path also writes the CSV on the
+    IDE machine."""
+    res = call("trace_save", timeout=180, trace=trace, upload=upload, csv_path=csv_path)
+    if mode == "csv":
+        return {"path": res.get("path"), "csv": res["csv"]}
+    out = parse_csv(res["csv"], max_rows, mode, start_ms, end_ms, variables)
+    if res.get("path"):
+        out["path"] = res["path"]
+    return out
+
+
+# ---- HMI (visualizations)
+#
+# A visualization export made by the ctrlx-hmi skill (visugen) carries the whole device tree, which an
+# existing project refuses ("cannot be pasted here"). The bridge (on the machine with the IDE) therefore
+# starts a second, headless IDE as a helper, imports the export into a temp project there, exports just the
+# HMI objects and imports those into the open project. The export is sent to the bridge as text, so this
+# works the same with the server on Linux over the tunnel.
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@mcp.tool()
+def import_visu(export_file: str, app: str = "Device/Plc Logic/Application", replace: bool = True) -> Any:
+    """Import the visualizations and text lists from a visualization export (the .export file written by
+    the ctrlx-hmi skill's visugen; a path on the machine running this server) into the open project's
+    application, end to end. The IDE machine starts a headless helper IDE for a minute or so. Objects of
+    the same name are replaced (replace=True); an existing Visualization Manager is kept. Not saved: call
+    save_project. Afterwards open the GlobalTextList and run Update Visualization Text IDs once. Use
+    add_web_visu to publish a screen as a web visualization."""
+    export_file = os.path.abspath(export_file)
+    if not os.path.exists(export_file):
+        raise BridgeError(f"no such file: {export_file}")
+    with open(export_file, encoding="utf-8-sig") as f:
+        xml = f.read()
+    return call("visu_import", timeout=420, xml=xml, app=app, replace=replace)
+
+
+@mcp.tool()
+def add_web_visu(start_visu: str, name: str = "HMI", width: int = 1920, height: int = 1080,
+                 app: str = "Device/Plc Logic/Application", from_web_visu: Optional[str] = None) -> Any:
+    """Add (or replace) a web visualization under the Visualization Manager that starts on the visu
+    `start_visu` (for example INT_Main) with the given client size (1080p by default). The bridge copies a
+    Web Visualization that is already in the project (`from_web_visu`, or the first one); a project with
+    none needs one added in the IDE once (Visualization Manager > Add Object > Web Visualization). Needs
+    the Visualization Manager, so run import_visu first. Not saved: call save_project."""
+    return call("web_visu_add", name=name, start_visu=start_visu, width=width, height=height, app=app,
+                from_web_visu=from_web_visu)
+
+
+@mcp.tool()
+def build_hmi(screen_file: str, out_file: str = "", scenarios_file: str = "", preview_dir: str = "") -> Any:
+    """Generate a visualization export from a screen definition (the ctrlx-hmi skill's visugen), and
+    optionally render SVG previews. `screen_file` is a Python screen definition (see the ctrlx-hmi skill);
+    `out_file` defaults to build/<name>.export next to it. With `scenarios_file` (SCENARIOS = {name:
+    {variable: value}}) the previews are written to `preview_dir` (default build/preview). Returns the
+    export path and the preview files; look at the SVGs before importing. Needs the ctrlx-hmi skill."""
+    screen_file = os.path.abspath(screen_file)
+    if not os.path.isfile(screen_file):
+        raise BridgeError(f"no such file: {screen_file}")
+    base = os.path.dirname(screen_file)
+    out_file = os.path.abspath(out_file or os.path.join(
+        base, "build", os.path.splitext(os.path.basename(screen_file))[0].replace("screen_", "") + ".export"))
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    rc, out = _run_script([_skill_script("ctrlx-hmi", "visugen.py"), screen_file, out_file])
+    if rc != 0:
+        raise BridgeError("visugen failed:\n" + out)
+    res: dict[str, Any] = {"export": out_file, "log": out}
+    if scenarios_file:
+        pdir = os.path.abspath(preview_dir or os.path.join(os.path.dirname(out_file), "preview"))
+        rc, out = _run_script([_skill_script("ctrlx-hmi", "preview.py"), out_file,
+                               os.path.abspath(scenarios_file), pdir])
+        if rc != 0:
+            raise BridgeError("preview failed:\n" + out)
+        res["previews"] = sorted(os.path.join(pdir, f) for f in os.listdir(pdir) if f.endswith(".svg"))
+    return res
+
+
+@mcp.tool()
+def publish_hmi(screen_file: str, start_visu: str, name: str = "HMI", width: int = 1920, height: int = 1080,
+                app: str = "Device/Plc Logic/Application", save: bool = True) -> Any:
+    """The whole HMI pipeline in one call: build_hmi (screen definition -> export), import_visu into the
+    open project, add_web_visu starting on `start_visu`, then save_project. Preview with build_hmi first.
+    Afterwards, once, in the IDE: open the GlobalTextList and run Update Visualization Text IDs, then build."""
+    built = build_hmi(screen_file)
+    imported = import_visu(built["export"], app=app)
+    web = add_web_visu(start_visu, name=name, width=width, height=height, app=app)
+    saved = save_project() if save else None
+    return {"export": built["export"], "import": imported, "web_visu": web, "saved": saved}
+
+
+# ---- escape hatch
+
+@mcp.tool()
+def exec_script(code: str) -> Any:
+    """Run IronPython in the scripting engine. Assign to `result` to return a value.
+    Use for introspection (dir(obj)) or anything without a dedicated tool."""
+    return call("exec", timeout=300, code=code)
+
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("CTRLX_MCP_TOKEN must be set, or put the token in .ctrlx_token (project root or scripts/)")
+    mcp.run()

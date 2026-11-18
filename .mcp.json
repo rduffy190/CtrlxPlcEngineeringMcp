@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ctrlx-engineering": {
+      "command": ".venv/bin/python",
+      "args": ["server/server.py"],
+      "env": {
+        "CTRLX_BRIDGE_HOST": "127.0.0.1",
+        "CTRLX_BRIDGE_PORT": "8765",
+        "CTRLX_MCP_TOKEN": "${CTRLX_MCP_TOKEN}"
+      }
+    }
+  }
+}

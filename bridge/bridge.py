@@ -1,0 +1,1202 @@
+# -*- coding: utf-8 -*-
+"""ctrlX PLC Engineering scripting bridge (IronPython 2.7).
+
+Start it with the IDE (scripts/start_bridge.bat does this):
+    "<ctrlX PLC Engineering>.exe" --runscript="C:\\path\\to\\bridge.py"
+or from a running IDE: Tools > Scripting > Execute Script File.
+Needs CTRLX_MCP_TOKEN in the environment. CTRLX_MCP_PROJECT (optional) is opened at startup.
+
+Serves newline-delimited JSON over TCP on 127.0.0.1 (CTRLX_MCP_PORT, default 8765).
+Request : {"id": 1, "token": "...", "cmd": "get_pou", "args": {...}}
+Response: {"id": 1, "ok": true, "result": ...} | {"ok": false, "error": "...", "traceback": "..."}
+
+How it runs (all of this was found by trial on ctrlX PLC Engineering 4.6, ScriptEngine 4.2):
+* The script returns at once, so the IDE stays usable. Requests are accepted on a background
+  thread and each one is run on the IDE's UI thread (a hidden WinForms control created at
+  startup, Control.Invoke), one at a time. Compiling or logging in from the background
+  thread fails with "An item with the same key has already been added".
+* The online module raises "Stack empty" unless a script is executing. The execution entry is
+  saved at startup and pushed back before each online call (_save_online_ctx).
+* A long call (download, build) blocks the UI for its duration.
+* CTRLX_MCP_BLOCK=1 serves on the script thread instead and never returns (headless --noUI).
+* trace.create() does not work: the trace object is added in the IDE (Add Object > Trace) and
+  configured here. Trace variable names are relative to the application (no "Application.").
+
+Keep it py2/py3 compatible so the protocol can be tested outside the IDE with stubbed
+scriptengine globals. The scriptengine names used (projects, online, system, trace,
+OnlineChangeOption, TriggerState, TriggerEdge, PouType, ImplementationLanguages, Resolution)
+are injected into the script scope by the IDE.
+"""
+import json
+import os
+import select
+import socket
+import sys
+import re
+import tempfile
+import threading
+import time
+import traceback
+
+try:
+    from StringIO import StringIO
+except ImportError:
+    from io import StringIO
+
+HOST = os.environ.get("CTRLX_MCP_HOST", "127.0.0.1")
+PORT = int(os.environ.get("CTRLX_MCP_PORT", "8765"))
+TOKEN = os.environ.get("CTRLX_MCP_TOKEN", "")
+ALLOW_EXEC = os.environ.get("CTRLX_MCP_ALLOW_EXEC", "1") == "1"
+PROJECT = os.environ.get("CTRLX_MCP_PROJECT", "")
+# 1 = serve on the script thread and never return (headless --noUI, where returning ends the process)
+BLOCK = os.environ.get("CTRLX_MCP_BLOCK", "0") == "1"
+UI = os.environ.get("CTRLX_MCP_UI", "1") == "1"   # run each request on the IDE UI thread
+# One log per port so several IDE instances (each with its own bridge port) do not share a file.
+LOG = os.path.join(os.environ.get("TEMP", tempfile.gettempdir()),
+                   "ctrlx_bridge.log" if PORT == 8765 else "ctrlx_bridge_%d.log" % PORT)
+MAX_REQUEST = 16 * 1024 * 1024
+
+# Live objects that must outlive a single request.
+_online_apps = {}   # app path -> online application
+_editors = {}       # trace path -> trace editor
+
+
+# ---------------------------------------------------------------- helpers
+
+def _log(msg):
+    """Append to a log file; open/close each time so a crash keeps the last line."""
+    try:
+        f = open(LOG, "a")
+        try:
+            f.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
+        finally:
+            f.close()
+    except Exception:
+        pass
+
+
+_ui_ctrl = None   # hidden WinForms control created on the UI thread
+
+
+def _init_ui():
+    """Create a control on the thread running this script (the IDE's UI thread) so the
+    background loop can hand requests to it with Invoke."""
+    global _ui_ctrl
+    if not UI:
+        return
+    try:
+        import clr
+        clr.AddReference("System.Windows.Forms")
+        from System.Windows.Forms import Control
+        c = Control()
+        c.Handle                      # forces the handle onto this thread
+        _ui_ctrl = c
+        _log("ui dispatch ready")
+    except Exception as e:
+        _log("ui dispatch unavailable: %r" % (e,))
+
+
+def _run_on_ui(fn):
+    """Run fn on the UI thread and return its result; fn itself must not raise."""
+    if _ui_ctrl is None:
+        return fn()
+    from System import Func
+    return _ui_ctrl.Invoke(Func[object](fn))
+
+
+def _proj():
+    p = projects.primary
+    if p is None:
+        raise RuntimeError("no project open")
+    return p
+
+
+def _find(path):
+    """Resolve 'Device/PLC Logic/Application/GVL' by walking children by name."""
+    node = _proj()
+    for part in [p for p in path.split("/") if p]:
+        for child in node.get_children(False):
+            if child.get_name() == part:
+                node = child
+                break
+        else:
+            raise ValueError("'%s' not found under '%s'" % (part, node.get_name()))
+    return node
+
+
+def _enum(enum_cls, name):
+    try:
+        return getattr(enum_cls, name)
+    except AttributeError:
+        raise ValueError("unknown %s '%s'" % (getattr(enum_cls, "__name__", enum_cls), name))
+
+
+def _tree(node, depth):
+    out = []
+    for c in node.get_children(False):
+        item = {"name": c.get_name(),
+                "text": bool(getattr(c, "has_textual_declaration", False))}
+        if depth > 1:
+            item["children"] = _tree(c, depth - 1)
+        out.append(item)
+    return out
+
+
+def _messages():
+    """Collect build messages. Defensive: the message API differs between versions."""
+    out = []
+    try:
+        cats = [c for c in system.get_message_categories(True) if c is not None]
+    except Exception:
+        cats = []
+    for cat in cats:
+        try:
+            for m in system.get_message_objects(cat):
+                out.append({"severity": str(getattr(m, "severity", "")),
+                            "text": str(getattr(m, "text", m))})
+        except Exception as e:
+            out.append({"severity": "bridge", "text": "message read failed: %s" % e})
+    return out
+
+
+_online_ctx = None   # (stack, entry) of the online module's execution stack, saved at startup
+
+
+def _save_online_ctx():
+    """The online module keeps a stack of running scripts and raises 'Stack empty' when it is
+    empty. It is only filled while a script is executing; in background mode that script
+    returns at once. Remember the entry now so _ensure_online_ctx can put it back."""
+    global _online_ctx
+    try:
+        import clr
+        from System.Reflection import BindingFlags
+        f = online.GetType().GetField("_executionStack",
+                                      BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+        st = f.GetValue(online)
+        if st.Count:
+            _online_ctx = (st, st.Peek())
+            _log("online context saved")
+        else:
+            _log("online context: stack empty at startup")
+    except Exception as e:
+        _log("online context not saved: %r" % (e,))
+
+
+def _ensure_online_ctx():
+    if _online_ctx is not None and _online_ctx[0].Count == 0:
+        _online_ctx[0].Push(_online_ctx[1])
+        _log("online context restored")
+
+
+def _online(app_path):
+    _ensure_online_ctx()
+    app = _find(app_path)
+    oa = _online_apps.get(app_path)
+    if oa is None:
+        oa = online.create_online_application(app)
+        _online_apps[app_path] = oa
+    return oa
+
+
+# --------------------------------------------------------------- handlers
+
+def h_ping(a):
+    return {"bridge": "ctrlx-mcp", "python": sys.version,
+            "project": (projects.primary.path if projects.primary else None)}
+
+
+def h_exec(a):
+    """Run arbitrary scripting code. Assign to `result` to return a value."""
+    if not ALLOW_EXEC:
+        raise RuntimeError("exec disabled (CTRLX_MCP_ALLOW_EXEC=0)")
+    env = dict(globals())
+    env["result"] = None
+    buf, old = StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        exec(a["code"], env)
+    finally:
+        sys.stdout = old
+    return {"stdout": buf.getvalue(), "result": env["result"]}
+
+
+def h_open_project(a):
+    p = projects.open(a["path"])
+    return {"path": p.path}
+
+
+def h_save_project(a):
+    _proj().save()
+    return True
+
+
+def h_close_project(a):
+    _online_apps.clear()
+    _editors.clear()
+    _proj().close()
+    return True
+
+
+def h_get_tree(a):
+    root = _find(a["path"]) if a.get("path") else _proj()
+    return _tree(root, int(a.get("depth", 3)))
+
+
+def h_get_pou(a):
+    n = _find(a["path"])
+    r = {"declaration": n.textual_declaration.text}
+    if getattr(n, "has_textual_implementation", False):
+        r["implementation"] = n.textual_implementation.text
+    return r
+
+
+def h_set_pou(a):
+    n = _find(a["path"])
+    if a.get("declaration") is not None:
+        n.textual_declaration.replace(a["declaration"])
+    if a.get("implementation") is not None:
+        if not getattr(n, "has_textual_implementation", False):
+            raise ValueError("'%s' has a graphical body (LD/FBD/SFC); it cannot be set from text. "
+                             "Use import_plcopen with PLCopenXML." % a["path"])
+        n.textual_implementation.replace(a["implementation"])
+    return True
+
+
+def h_export_plcopen(a):
+    """Export objects as PLCopenXML and return the XML text."""
+    objs = [_find(p) for p in a["paths"]]
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_export.xml")
+    try:
+        _proj().export_xml(objs, tmp, bool(a.get("recursive", True)), False, True)
+        with open(tmp, "rb") as f:
+            raw = f.read()
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"xml": raw.decode("utf-8-sig", "replace")}
+
+
+def h_import_plcopen(a):
+    """Import PLCopenXML (text, or a path on this machine) into `parent`.
+
+    Imports go to the object the call is made on, so call it on the application, not the project:
+    on the project the new objects land at the project root. The application must be logged out.
+    """
+    parent = _find(a["parent"])
+    conflict = _enum(ConflictResolve, a.get("conflict", "Replace"))
+    tmp = None
+    if a.get("xml") is not None:
+        tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_import.xml")
+        with open(tmp, "wb") as f:
+            f.write(a["xml"].encode("utf-8"))
+        src = tmp
+    else:
+        src = a["file"]
+    try:
+        parent.import_xml(conflict, src, False)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+    return True
+
+
+def h_add_task_call(a):
+    """Add a program call to a task. There is no scripting call for it, so this round-trips the
+    task through export_native / import_native, adding an entry to its PouList. The IDE may show a
+    dialog while the task is re-imported (the user has to acknowledge it)."""
+    task = _find(a.get("task") or "Device/Plc Logic/Application/Task Configuration/MainTask")
+    program = a["program"]
+    cfg = task.parent
+    app = cfg.parent
+    if not [c for c in app.get_children(False) if c.get_name() == program]:
+        raise ValueError("program '%s' not found under '%s'" % (program, app.get_name()))
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_task.xml")
+    task.export_native(tmp)
+    with open(tmp, "rb") as f:
+        xml = f.read().decode("utf-8")
+    m = re.search(r'<List Name="PouList" Type="(\{[^}]*\})"\s*(/>|>)', xml)
+    if not m:
+        raise RuntimeError("task export has no PouList; format not understood")
+    if re.search(r'<Single Name="Name" Type="string">%s</Single>' % re.escape(program), xml[m.start():]):
+        os.remove(tmp)
+        return {"added": False, "reason": "already called by the task"}
+    item = (
+        '<Single Type="{f194d1ef-7376-42ce-a729-4a5485a97a46}" Method="IArchivable">'
+        '<Single Name="Name" Type="string">%s</Single>'
+        '<Single Name="Comment" Type="string"></Single></Single>' % program)
+    if m.group(2) == "/>":
+        xml = xml[:m.start()] + m.group(0)[:-2].rstrip() + ">" + item + "</List>" + xml[m.end():]
+    else:
+        end = xml.index("</List>", m.end())
+        xml = xml[:end] + item + xml[end:]
+    with open(tmp, "wb") as f:
+        f.write(xml.encode("utf-8"))
+    try:
+        cfg.import_native(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"added": True, "task": task.get_name(), "program": program}
+
+
+def h_remove_task_call(a):
+    """Remove a program call from a task. The calls are child objects of the task, so this needs
+    no re-import and no dialog."""
+    task = _find(a.get("task") or "Device/Plc Logic/Application/Task Configuration/MainTask")
+    program = a["program"]
+    for c in task.get_children(False):
+        if c.get_name() == program:
+            c.remove()
+            return {"removed": True, "task": task.get_name(), "program": program}
+    return {"removed": False, "reason": "the task does not call it"}
+
+
+def _io_params(dev):
+    """Channel parameters of an I/O device: name -> parameter (first connector, mappable ones)."""
+    out = {}
+    for c in dev.connectors:
+        for x in c.host_parameters:
+            try:
+                if x.is_mappable_io:
+                    out[x.name] = x
+            except Exception:
+                pass
+    return out
+
+
+def _io_channel(params, ch):
+    """Resolve 7, "7", "Channel_7" or "Channel_7.Value" to a parameter name."""
+    for cand in (str(ch), "Channel_%s.Value" % ch, "Channel_%s" % ch, str(ch) + ".Value"):
+        if cand in params:
+            return cand
+    raise ValueError("channel '%s' not found; have e.g. %s" % (ch, sorted(params)[:4]))
+
+
+def h_list_io(a):
+    """Channels of an I/O device with direction, bit size and mapped variable."""
+    dev = _find(a["device"])
+    chans = []
+    for name, x in _io_params(dev).items():
+        v = x.io_mapping.variable
+        chans.append({"channel": name, "direction": str(x.channel_type), "bits": x.bit_size,
+                      "variable": v if v else None})
+    chans.sort(key=lambda c: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", c["channel"])])
+    return {"device": a["device"], "channels": chans}
+
+
+def h_map_io(a):
+    """Map (or remap, or unmap with variable=None/"") channels of an I/O device to variables.
+    a["mappings"] is a list of {"channel": 1, "variable": "GVL_X.bFoo"}. A variable that does not
+    start with the application name gets "<app>." put in front (the mapping needs it)."""
+    dev = _find(a["device"])
+    app = a.get("app_name") or "Application"
+    params = _io_params(dev)
+    done = []
+    for m in a["mappings"]:
+        name = _io_channel(params, m["channel"])
+        var = m.get("variable")
+        if var and not var.startswith(app + "."):
+            var = app + "." + var
+        params[name].io_mapping.variable = var if var else ""
+        done.append({"channel": name, "variable": params[name].io_mapping.variable or None})
+    return {"device": a["device"], "mapped": done}
+
+
+def h_create_pou(a):
+    parent = _find(a["parent"])
+    kind = _enum(PouType, a.get("kind", "Program"))
+    lang = _enum(ImplementationLanguages, a.get("language", "st"))
+    if a.get("return_type"):
+        n = parent.create_pou(a["name"], kind, lang, a["return_type"])
+    else:
+        n = parent.create_pou(a["name"], kind, lang)
+    return {"name": n.get_name()}
+
+
+def h_create_dut(a):
+    n = _find(a["parent"]).create_dut(a["name"])
+    return {"name": n.get_name()}
+
+
+def h_create_gvl(a):
+    n = _find(a["parent"]).create_gvl(a["name"])
+    return {"name": n.get_name()}
+
+
+def h_delete(a):
+    _find(a["path"]).remove()
+    return True
+
+
+def h_create_folder(a):
+    """Create a folder under parent. name may be a path ('02_Gapper/POUs'): every missing level is created.
+    Existing folders are reused, so the call can be repeated. Returns the full path of the last folder."""
+    node = _find(a["parent"])
+    path = a["parent"].strip("/")
+    created = []
+    for part in [p for p in a["name"].split("/") if p]:
+        nxt = None
+        for child in node.get_children(False):
+            if child.get_name() == part:
+                nxt = child
+                break
+        if nxt is None:
+            node.create_folder(part)           # the scripting call returns nothing: look the folder up again
+            for child in node.get_children(False):
+                if child.get_name() == part:
+                    nxt = child
+                    break
+            if nxt is None:
+                raise ValueError("could not create folder '%s' under '%s'" % (part, node.get_name()))
+            created.append(part)
+        node = nxt
+        path += "/" + part
+    return {"path": path, "created": created}
+
+
+def h_move_object(a):
+    """Move an object (POU, DUT, GVL or folder) into the folder dest. Names do not change."""
+    obj = _find(a["path"])
+    dest = _find(a["dest"])
+    obj.move(dest)
+    return {"path": a["dest"].strip("/") + "/" + obj.get_name()}
+
+
+def h_build(a):
+    # build() lives on the application object, not the project
+    if a.get("app"):
+        app = _find(a["app"])
+        projects.primary.active_application = app
+    else:
+        app = projects.primary.active_application
+        if app is None:
+            raise ValueError("no active application; pass app")
+    app.build()
+    msgs = _messages()
+    errors = [m for m in msgs if "error" in m["severity"].lower()]
+    return {"errors": len(errors), "messages": msgs}
+
+
+def h_messages(a):
+    return _messages()
+
+
+# ---- online
+
+def h_login(a):
+    oa = _online(a["app"])
+    oa.login(_enum(OnlineChangeOption, a.get("change", "Try")), bool(a.get("download", False)))
+    return True
+
+
+def h_logout(a):
+    oa = _online_apps.pop(a["app"], None)
+    if oa is not None:
+        oa.logout()
+    return True
+
+
+def h_run_state(a):
+    oa = _online(a["app"])
+    return {"state": str(oa.application_state), "logged_in": bool(oa.is_logged_in)}
+
+
+def h_plc_start(a):
+    _online(a["app"]).start()
+    return True
+
+
+def h_plc_stop(a):
+    _online(a["app"]).stop()
+    return True
+
+
+def _online_fresh(app_path):
+    """Drop the cached online object and make a new one. The cached one goes stale when the
+    application is logged in or out in the IDE: reads then fail with 'Invalid variable reference'
+    and writes do nothing."""
+    _online_apps.pop(app_path, None)
+    return _online(app_path)
+
+
+def h_read_var(a):
+    def read(oa):
+        return {n: str(oa.read_value(n)) for n in a["names"]}
+    try:
+        return read(_online(a["app"]))
+    except Exception:
+        return read(_online_fresh(a["app"]))
+
+
+def h_write_var(a):
+    oa = _online(a["app"])
+    first = next(iter(a["values"]))
+    try:
+        oa.read_value(first)        # probe: a stale object fails here instead of ignoring the write
+    except Exception:
+        oa = _online_fresh(a["app"])
+        oa.read_value(first)
+    for n, v in a["values"].items():
+        oa.set_prepared_value(n, str(v))
+    oa.write_prepared_values()
+    return True
+
+
+# ---- trace
+
+def _trace_obj(path):
+    t = _find(path)
+    if not hasattr(t, "variable_list"):
+        raise ValueError("'%s' is not a trace object (see list_traces / create_trace)" % path)
+    return t
+
+
+def _plain(v):
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return str(v)
+
+
+_TRACE_ATTRS = ("comment", "every_n_cycles", "resolution", "trigger_enabled", "trigger_variable",
+                "trigger_edge", "trigger_level", "post_trigger_samples", "auto_start", "task_name",
+                "record_condition")
+
+
+def _trace_config(t):
+    """Everything a trace holds: settings, recorded variables and which diagram draws what."""
+    cfg = {}
+    for n in _TRACE_ATTRS:
+        try:
+            cfg[n] = _plain(getattr(t, n))
+        except Exception:
+            pass
+    cfg["variables"] = [str(v.variable_name) for v in t.variable_list]
+    # a diagram variable has no name of its own (only .visible), so report how many each draws
+    cfg["diagrams"] = [{"name": str(d.name), "variables_drawn": len(list(d.variables))} for d in t.diagrams]
+    return cfg
+
+
+def _norm_var(v):
+    return v[len("Application."):] if v.startswith("Application.") else v
+
+
+def h_list_traces(a):
+    """All trace objects under a node (default the application), with a short summary."""
+    root = _find(a.get("app") or _APP_PATH)
+    out = []
+
+    def walk(node, path):
+        for c in node.get_children(False):
+            cp = path + "/" + c.get_name()
+            if hasattr(c, "variable_list"):
+                out.append({"path": cp, "variables": [str(v.variable_name) for v in c.variable_list],
+                            "samples": _plain(getattr(c, "post_trigger_samples", None)),
+                            "trigger_enabled": _plain(getattr(c, "trigger_enabled", None)),
+                            "trigger_variable": _plain(getattr(c, "trigger_variable", None))})
+            walk(c, cp)
+    walk(root, a.get("app") or _APP_PATH)
+    return out
+
+
+def h_get_trace(a):
+    """Read a trace's configuration (no changes, no editor opened) plus its run state if a
+    trace editor is open on it."""
+    t = _trace_obj(a["trace"])
+    res = _trace_config(t)
+    res["trace"] = a["trace"]
+    ed = _editors.get(a["trace"])
+    if ed is not None:
+        res["run"] = _editor_state(ed)
+    return res
+
+
+def h_trace_setup(a):
+    """Configure an existing trace object (create one with create_trace or in the IDE: Add Object >
+    Trace). Variable names are relative to the application (no 'Application.' prefix; with it the
+    download silently does nothing). Every argument is optional; only what is given changes."""
+    t = _trace_obj(a["trace"])
+    if a.get("variables") is not None:
+        t.variable_list.clear()
+        for v in a["variables"]:
+            t.add_trace_variable(_norm_var(v))
+    if a.get("remove_variables"):
+        gone = [_norm_var(v) for v in a["remove_variables"]]
+        for item in list(t.variable_list):
+            if str(item.variable_name) in gone:
+                t.variable_list.remove(item)
+    if a.get("add_variables"):
+        have = [str(v.variable_name) for v in t.variable_list]
+        for v in a["add_variables"]:
+            v = _norm_var(v)
+            if v not in have:
+                t.add_trace_variable(v)
+                have.append(v)
+    if a.get("variables") is not None or a.get("add_variables") or a.get("remove_variables"):
+        # variables in the record list are not drawn until they are in a diagram, and a diagram
+        # variable cannot be matched to a record variable, so rebuild the first diagram from the list
+        diagrams = list(t.diagrams)
+        d = diagrams[0] if diagrams else t.diagrams.add()
+        d.variables.clear()
+        for v in t.variable_list:
+            d.add_diagram_variable(v, True)
+    if a.get("every_n_cycles"):
+        t.every_n_cycles = int(a["every_n_cycles"])
+    if a.get("resolution"):
+        t.resolution = _enum(Resolution, a["resolution"])
+    if a.get("trigger_variable"):
+        t.trigger_enabled = True
+        t.trigger_variable = a["trigger_variable"]
+        t.trigger_edge = _enum(TriggerEdge, a.get("trigger_edge") or "Positive")
+        if a.get("trigger_level") is not None:
+            t.trigger_level = str(a["trigger_level"])
+    else:
+        if a.get("trigger_level") is not None:
+            t.trigger_level = str(a["trigger_level"])
+        if a.get("trigger_edge"):
+            t.trigger_edge = _enum(TriggerEdge, a["trigger_edge"])
+    if a.get("trigger_enabled") is not None:
+        t.trigger_enabled = bool(a["trigger_enabled"])
+    if a.get("samples"):
+        t.post_trigger_samples = int(a["samples"])
+    if a.get("comment") is not None:
+        t.comment = a["comment"]
+    if a.get("auto_start") is not None:
+        t.auto_start = bool(a["auto_start"])
+    if a.get("task_name") is not None:
+        t.task_name = a["task_name"]
+    if a.get("record_condition") is not None:
+        t.record_condition = a["record_condition"]
+    res = _trace_config(t)
+    res["trace"] = a["trace"]
+    return res
+
+
+def _native_text(obj):
+    """export_native of one object, as text (the IDE writes it to a file)."""
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_clone.native")
+    obj.export_native(tmp)
+    try:
+        with open(tmp, "rb") as f:
+            return f.read().decode("utf-8")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _set_single(x, tag, value, count=0):
+    """Set <Single Name="tag" ...>value</Single>. value may be a function: called once per match."""
+    pat = r'(<Single Name="%s" Type="[^"]*">)[^<]*(</Single>)' % tag
+    get = value if callable(value) else (lambda: value)
+    return re.subn(pat, lambda m: m.group(1) + get() + m.group(2), x, count)
+
+
+def _new_guid():
+    import System
+    return str(System.Guid.NewGuid())
+
+
+def _import_native_text(parent, x, tag):
+    tmp = os.path.join(tempfile.gettempdir(), "ctrlx_mcp_%s.native" % tag)
+    with open(tmp, "wb") as f:
+        f.write(x.encode("utf-8"))
+    try:
+        parent.import_native(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def h_trace_create(a):
+    """Create an empty trace by copying a trace that is already in the project. Scripts cannot create one
+    (trace.create returns a stub), and no trace template is shipped: the source is `from_trace`, or else
+    the first trace in the application. The copy gets fresh ids and the new name, then its variables,
+    trigger and comment are cleared. replace=True removes a trace of the same name first."""
+    parent_path = a.get("parent") or _APP_PATH
+    parent = _find(parent_path)
+    app = _find(_APP_PATH)
+    name = a["name"]
+    if a.get("from_trace"):
+        src = _trace_obj(a["from_trace"])
+    else:
+        found = h_list_traces({"app": _APP_PATH})
+        if not found:
+            raise ValueError("there is no trace in the project to copy. Add one Trace in the IDE once "
+                             "(right-click the Application > Add Object > Trace), then call create_trace again")
+        src = _trace_obj(found[0]["path"])
+    x = _native_text(src)     # before any removal: the source may be the trace being replaced
+    for c in parent.get_children(False):
+        if c.get_name() == name:
+            if not a.get("replace"):
+                raise ValueError("'%s' already exists; use replace or another name" % name)
+            c.remove()
+    x = _set_single(x, "Guid", _new_guid(), 1)[0]
+    x = _set_single(x, "ParentGuid", str(parent.guid))[0]
+    x = _set_single(x, "ParentSVNodeGuid", str(parent.guid))[0]
+    x = _set_single(x, "AppGuid", str(app.guid))[0]
+    for tag in ("DownloadGuid", "ExitGuid", "DiagramGuid"):
+        x = _set_single(x, tag, _new_guid)[0]
+    x = _set_single(x, "Name", name, 1)[0]
+    x = _set_single(x, "RecordName", name)[0]
+    _import_native_text(parent, x, "trace")
+    path = parent_path + "/" + name
+    t = _trace_obj(path)
+    # blank it: the copy came with the source's variables and settings
+    t.variable_list.clear()
+    for i, d in enumerate(list(t.diagrams)):
+        if i == 0:
+            d.variables.clear()
+        else:
+            t.diagrams.remove(d)
+    for attr, value in (("trigger_enabled", False), ("trigger_variable", ""), ("comment", "")):
+        try:
+            setattr(t, attr, value)
+        except Exception:
+            pass
+    return {"trace": path, "copied_from": src.get_name(), "variables": [str(v.variable_name) for v in t.variable_list]}
+
+
+def _wait(cond, seconds):
+    deadline = time.time() + seconds
+    while not cond() and time.time() < deadline:
+        system.delay(100)
+    return cond()
+
+
+def h_trace_run(a):
+    """Log in if needed, then start the trace. With download (the default) the trace configuration
+    is sent to the controller first (not the application program: the PLC is not touched); the IDE
+    may ask the user to acknowledge that in a dialog and this call waits for it.
+    With download=False the trace already on the controller is re-armed and started again."""
+    oa = _online(a["app"])
+    if not oa.is_logged_in:
+        oa.login(OnlineChangeOption.Try, False)   # Never would stop a running controller
+    ed = _find(a["trace"]).open_editor()
+    if a.get("download", True):
+        ed.download()
+    else:
+        # a finished trace cannot start until its trigger is re-armed (takes a moment)
+        ed.reset_trigger()
+        _wait(lambda: str(ed.get_trigger_state()) != "TriggerReached", 5)
+    ed.start()
+    _editors[a["trace"]] = ed
+    if not _wait(lambda: ed.is_running, 5):
+        raise RuntimeError("trace did not start (editor logged in: %s, trigger: %s)"
+                           % (ed.is_logged_in, ed.get_trigger_state()))
+    return True
+
+
+def h_trace_stop(a):
+    """Stop the trace if it is running (a full trace has stopped itself)."""
+    ed = _editor(a["trace"])
+    if ed.is_running:
+        ed.stop()
+        _wait(lambda: not ed.is_running, 5)
+    return {"running": bool(ed.is_running), "state": str(ed.get_packet_state())}
+
+
+def _editor(path):
+    ed = _editors.get(path)
+    if ed is None:
+        ed = _trace_obj(path).open_editor()
+        _editors[path] = ed
+    return ed
+
+
+def _editor_state(ed):
+    def get(fn):
+        # before the first download the trigger and packet state raise "not downloaded to the device"
+        try:
+            return fn()
+        except Exception:
+            return None
+    st = {"running": get(lambda: bool(ed.is_running)), "online": get(lambda: bool(ed.is_online)),
+          "logged_in": get(lambda: bool(ed.is_logged_in)),
+          "trigger": get(lambda: str(ed.get_trigger_state())), "packet": get(lambda: str(ed.get_packet_state()))}
+    if st["trigger"] is None and st["packet"] is None:
+        st["note"] = "the trace has not been downloaded to the device yet (trace_run)"
+    return st
+
+
+def h_trace_status(a):
+    """Run state of a trace: running, online, trigger state and packet state. Opens the trace
+    editor if it is not open yet (after a bridge restart)."""
+    return _editor_state(_editor(a["trace"]))
+
+
+def h_trace_state(a):
+    return str(_editor(a["trace"]).get_trigger_state())
+
+
+def h_trace_wait(a):
+    """Poll for the trigger. Returns {'triggered': bool, 'state': str}."""
+    ed = _editor(a["trace"])
+    deadline = time.time() + float(a.get("timeout_s", 30))
+    while True:
+        st = ed.get_trigger_state()
+        if st == TriggerState.TriggerReached:
+            return {"triggered": True, "state": str(st)}
+        if time.time() >= deadline:
+            return {"triggered": False, "state": str(st)}
+        system.delay(200)
+
+
+def h_trace_save(a):
+    """Stop the trace, export CSV and return its text."""
+    ed = _editor(a["trace"])
+    if ed.is_running:       # a trace that filled its buffer has stopped itself
+        ed.stop()
+    if a.get("upload"):
+        ed.upload_to_device_trace()
+    path = a.get("csv_path")
+    tmp = None
+    if not path:
+        fd, tmp = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        path = tmp
+    ed.save(path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    if tmp:
+        os.remove(tmp)
+    return {"path": None if tmp else path,
+            "csv": raw.decode("utf-8", "replace")}
+
+
+def _jsonable(x):
+    """IronPython's json encoder calls s.decode('utf-8') on every non-ASCII str, but a str here is
+    already text (a .NET string), so one stray character such as a u-umlaut in a library name made
+    json.dumps raise, the reply was lost and the client timed out. Hand it UTF-8 bytes instead,
+    which it decodes back to the same text. CPython (the tests) needs nothing."""
+    if sys.platform == "cli" and isinstance(x, str):
+        if any(ord(c) > 127 for c in x):
+            return x.encode("utf-8")
+        return x
+    if isinstance(x, dict):
+        return dict((_jsonable(k), _jsonable(v)) for k, v in x.items())
+    if isinstance(x, (list, tuple)):
+        return [_jsonable(v) for v in x]
+    return x
+
+
+# Objects that every new application has; anything else in an imported visualization export is HMI content.
+_APP_FIXED = ("Library Manager", "PLC_PRG", "Symbols", "Task Configuration", "CheckFunctions",
+              "__VisualizationStyle")
+_APP_PATH = "Device/Plc Logic/Application"
+
+
+def h_visu_extract(a):
+    """Helper-instance step of import_visu: import a visualization export (it carries a whole device tree)
+    into a fresh temp project, then export the HMI objects (Visualization Manager, text lists, visus)
+    one by one as object-level native files that paste into any application."""
+    out = a["out_dir"]
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    proj = projects.create(os.path.join(out, "hmi_tmp.project"), True)
+    try:
+        proj.import_native(a["file"])
+        app = _find(a.get("app") or _APP_PATH)
+        res = []
+        for c in app.get_children(False):
+            n = c.get_name()
+            if n in _APP_FIXED or n.startswith("__"):
+                continue
+            f = os.path.join(out, n.replace(" ", "_") + ".native")
+            c.export_native(f)
+            res.append({"name": n, "file": f})
+    finally:
+        proj.close()
+    return res
+
+
+def h_visu_apply(a):
+    """Import the object files made by visu_extract into the application. Existing objects of the same
+    name are replaced; an existing Visualization Manager is kept (its web visus live under it)."""
+    app = _find(a.get("app") or _APP_PATH)
+    replace = a.get("replace", True)
+    done, skipped = [], []
+    for o in a["objects"]:
+        same = [c for c in app.get_children(False) if c.get_name() == o["name"]]
+        if same and o["name"] == "Visualization Manager":
+            skipped.append(o["name"])
+            continue
+        if same and not replace:
+            skipped.append(o["name"])
+            continue
+        for c in same:
+            c.remove()
+        app.import_native(o["file"])
+        done.append(o["name"])
+    return {"imported": done, "skipped": skipped}
+
+
+def _rpc_local(port, cmd, args, timeout=60):
+    """One request to another bridge on this machine (the headless helper IDE)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        s.sendall((json.dumps({"id": 1, "token": TOKEN, "cmd": cmd, "args": args}) + "\n").encode("utf-8"))
+        s.settimeout(timeout)
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    resp = json.loads(buf.decode("utf-8"))
+    if not resp.get("ok"):
+        raise RuntimeError("helper: %s" % resp.get("error"))
+    return resp.get("result")
+
+
+_hiders = {}   # helper pid -> threading.Event that stops its window hider
+
+
+def _hide_windows_of(pid):
+    """Hide every visible top-level window of process `pid` (--noUI still flashes a splash/main window)."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+    def cb(hwnd, lparam):
+        owner = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            user32.ShowWindow(hwnd, 0)   # SW_HIDE
+        return 1
+    user32.EnumWindows(proto(cb), 0)
+
+
+def _keep_hidden(pid):
+    stop = threading.Event()
+    _hiders[pid] = stop
+
+    def run():
+        while not stop.is_set():
+            try:
+                _hide_windows_of(pid)
+            except Exception as e:
+                _log("window hider: %r" % (e,))
+                return
+            stop.wait(0.15)
+    t = threading.Thread(target=run)
+    t.daemon = True
+    t.start()
+
+
+def _start_helper_ide(port):
+    """Start a second, windowless IDE running this bridge on `port`. Returns the Process."""
+    from System.Diagnostics import Process, ProcessStartInfo, ProcessWindowStyle
+    exe = Process.GetCurrentProcess().MainModule.FileName
+    script = os.environ.get("CTRLX_MCP_BRIDGE") or globals().get("__file__")
+    if not script or not os.path.exists(script):
+        raise RuntimeError("bridge script path unknown; start the IDE with scripts\\start_bridge.bat")
+    psi = ProcessStartInfo(exe, '--noUI --runscript="%s"' % script)
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    psi.WindowStyle = ProcessWindowStyle.Hidden
+    psi.EnvironmentVariables["CTRLX_MCP_PORT"] = str(port)
+    psi.EnvironmentVariables["CTRLX_MCP_TOKEN"] = TOKEN
+    psi.EnvironmentVariables["CTRLX_MCP_PROJECT"] = ""
+    psi.EnvironmentVariables["CTRLX_MCP_BRIDGE"] = script
+    proc = Process.Start(psi)
+    _keep_hidden(proc.Id)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            _rpc_local(port, "ping", {}, 20)
+            return proc
+        except Exception:
+            time.sleep(2)
+    _stop_helper_ide(proc)
+    raise RuntimeError("helper IDE did not come up on port %d" % port)
+
+
+def _stop_helper_ide(proc):
+    from System.Diagnostics import Process, ProcessStartInfo
+    ev = _hiders.pop(proc.Id, None)
+    if ev is not None:
+        ev.set()
+    psi = ProcessStartInfo("taskkill", "/PID %d /T /F" % proc.Id)
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    Process.Start(psi).WaitForExit(15000)
+
+
+def h_visu_import(a):
+    """Import a visualization export (XML text in `xml`, or a path on this machine in `file`) into the
+    application. A visugen export carries a whole device tree, which an open project refuses, so a headless
+    helper IDE (CTRLX_HELPER_PORT, default 8766) imports it into a temp project and exports just the HMI
+    objects; those are then imported here. Everything runs on the machine with the IDE, so the caller can
+    be anywhere (for example Linux over the tunnel)."""
+    out = tempfile.mkdtemp(prefix="ctrlx_visu_")
+    if a.get("xml") is not None:
+        src = os.path.join(out, "export.export")
+        with open(src, "wb") as f:
+            f.write(a["xml"].encode("utf-8"))
+    else:
+        src = a["file"]
+    port = int(os.environ.get("CTRLX_HELPER_PORT", "8766"))
+    proc = _start_helper_ide(port)
+    try:
+        objs = _rpc_local(port, "visu_extract", {"file": src, "out_dir": out, "app": a.get("app")}, 150)
+    finally:
+        _stop_helper_ide(proc)
+    if not objs:
+        raise RuntimeError("the export contained no visualization objects")
+    return h_visu_apply({"objects": objs, "app": a.get("app"), "replace": a.get("replace", True)})
+
+
+WEBVISU_TYPE = "0fdbf158-1ae0-47d9-9269-cd84be308e9d"   # type id of a Web Visualization object
+
+
+def h_web_visu_add(a):
+    """Add (or replace) a Web Visualization under the Visualization Manager that starts on `start_visu`.
+    No template is shipped: an existing Web Visualization in the project is copied (`from_web_visu`, or
+    else the first one) with a new name, start visu and client size."""
+    app = _find(a.get("app") or _APP_PATH)
+    vm = [c for c in app.get_children(False) if c.get_name() == "Visualization Manager"]
+    if not vm:
+        raise ValueError("no Visualization Manager in the application; run import_visu first")
+    vm = vm[0]
+    kids_ = list(vm.get_children(False))
+    if a.get("from_web_visu"):
+        src = [c for c in kids_ if c.get_name() == a["from_web_visu"]]
+        if not src:
+            raise ValueError("no '%s' under the Visualization Manager" % a["from_web_visu"])
+        src = src[0]
+    else:
+        src = [c for c in kids_ if str(c.type) == WEBVISU_TYPE]
+        if not src:
+            raise ValueError("there is no Web Visualization in the project to copy. Add one in the IDE once "
+                             "(right-click the Visualization Manager > Add Object > Web Visualization), then call "
+                             "add_web_visu again")
+        src = src[0]
+    x = _native_text(src)     # before any removal: the source may be the one being replaced
+    for tag, value in (("StartVisu", a["start_visu"]), ("ClientSizeX", str(a.get("width", 1920))),
+                       ("ClientSizeY", str(a.get("height", 1080)))):
+        x, n = _set_single(x, tag, value)
+        if n != 1:
+            raise RuntimeError("the Web Visualization export has %d '%s' fields, expected 1" % (n, tag))
+    x = _set_single(x, "Name", a["name"], 1)[0]
+    x = _set_single(x, "Guid", _new_guid(), 1)[0]
+    for c in kids_:
+        if c.get_name() == a["name"]:
+            c.remove()
+    _import_native_text(vm, x, "webvisu")
+    return {"name": a["name"], "start_visu": a["start_visu"], "copied_from": src.get_name()}
+
+
+HANDLERS = dict(
+    (k[2:], v) for k, v in list(globals().items())
+    if k.startswith("h_") and callable(v))
+
+
+# ------------------------------------------------------------------ server
+
+def dispatch(req):
+    rid = req.get("id")
+    if not TOKEN or req.get("token") != TOKEN:
+        return {"id": rid, "ok": False, "error": "unauthorized"}
+    fn = HANDLERS.get(req.get("cmd"))
+    if fn is None:
+        return {"id": rid, "ok": False, "error": "unknown cmd '%s'" % req.get("cmd")}
+    try:
+        return {"id": rid, "ok": True, "result": fn(req.get("args") or {})}
+    except Exception as e:
+        return {"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e),
+                "traceback": traceback.format_exc()}
+
+
+def _read_line(conn):
+    buf = b""
+    while b"\n" not in buf:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > MAX_REQUEST:
+            raise ValueError("request too large")
+    return buf.split(b"\n", 1)[0]
+
+
+def serve():
+    if not TOKEN:
+        raise SystemExit("CTRLX_MCP_TOKEN must be set")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # On Windows SO_REUSEADDR lets a second copy bind the same port silently; refuse instead.
+    srv.setsockopt(socket.SOL_SOCKET,
+                   getattr(socket, "SO_EXCLUSIVEADDRUSE", socket.SO_REUSEADDR), 1)
+    try:
+        srv.bind((HOST, PORT))
+    except socket.error as e:
+        raise SystemExit("cannot listen on %s:%d (bridge already running?): %s" % (HOST, PORT, e))
+    srv.listen(5)
+    srv.settimeout(1.0)  # wake regularly so the IDE can abort the script
+    _save_online_ctx()
+    if not BLOCK:
+        _init_ui()
+    if PROJECT and projects.primary is None:
+        try:
+            projects.open(PROJECT)
+            _log("opened project %s" % PROJECT)
+        except Exception as e:
+            _log("could not open project %s: %r" % (PROJECT, e))
+    print("ctrlx-mcp bridge listening on %s:%d" % (HOST, PORT))
+    if BLOCK:
+        _loop(srv)
+    else:
+        # --runscript / Execute Script File run on the IDE's UI thread: a script that never
+        # returns freezes the IDE. Accept on a background thread and return.
+        try:
+            # a .NET worker thread starts with a small stack; exceptions in IronPython
+            # are stack hungry and overflow it ("new guard page could not be created")
+            threading.stack_size(64 * 1024 * 1024)
+        except Exception as e:
+            _log("stack_size failed: %r" % (e,))
+        t = threading.Thread(target=_loop, args=(srv,))
+        t.daemon = True
+        t.start()
+        print("ctrlx-mcp bridge running in background thread (log: %s)" % LOG)
+
+
+def _loop(srv):
+    _log("loop started")
+    while True:
+        # select instead of catching socket.timeout every second: no exceptions when idle
+        try:
+            ready = select.select([srv], [], [], 1.0)[0]
+        except Exception as e:
+            _log("select failed: %r" % (e,))
+            time.sleep(1)
+            continue
+        if not ready:
+            continue
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            continue
+        _log("connection")
+        try:
+            conn.settimeout(10)
+            line = _read_line(conn)
+            if line:
+                try:
+                    req = json.loads(line.decode("utf-8"))
+                    resp = _run_on_ui(lambda: dispatch(req))
+                except ValueError as e:
+                    resp = {"ok": False, "error": "bad request: %s" % e}
+                except Exception as e:
+                    _log(traceback.format_exc())
+                    resp = {"ok": False, "error": "bridge: %s: %s" % (type(e).__name__, e)}
+                conn.settimeout(None)
+                conn.sendall(json.dumps(_jsonable(resp), default=str).encode("utf-8") + b"\n")
+        except Exception:
+            _log(traceback.format_exc())
+            traceback.print_exc()
+        finally:
+            conn.close()
+
+
+if __name__ == "__main__":
+    serve()
