@@ -11,12 +11,14 @@ rem      (it does not install them: that is up to you)
 rem   5. registers the MCP server with Claude Code (local scope, this folder only) when the claude CLI is
 rem      present, otherwise prints the configuration to add to your MCP client
 rem   6. checks that the server imports
-rem Skills are looked for in %CTRLX_SKILLS_DIR% or %USERPROFILE%\.claude\skills.
+rem Skills are looked for in %CTRLX_SKILLS_DIR%, else the skills\ folder of the release zip, else
+rem %USERPROFILE%\.claude\skills (the same order the server uses).
 setlocal EnableDelayedExpansion
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 set "VENVPY=%ROOT%\.venv\Scripts\python.exe"
 set "SKILLS_DIR=%CTRLX_SKILLS_DIR%"
+if "%SKILLS_DIR%"=="" if exist "%ROOT%\skills\" set "SKILLS_DIR=%ROOT%\skills"
 if "%SKILLS_DIR%"=="" set "SKILLS_DIR=%USERPROFILE%\.claude\skills"
 set "PAUSE=1"
 for %%A in (%*) do (

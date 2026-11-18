@@ -2,7 +2,8 @@
 
 Env: CTRLX_BRIDGE_HOST (127.0.0.1), CTRLX_BRIDGE_PORT (8765), CTRLX_MCP_TOKEN (required unless
 a .ctrlx_token file exists in the project root or scripts/, which is how Windows is set up),
-CTRLX_SKILLS_DIR (~/.claude/skills; holds ctrlx-engineer and codesys-lad, used by the ladder tools).
+CTRLX_SKILLS_DIR (default: the skills/ folder next to server/ when it exists, as in the release zip, else
+~/.claude/skills; holds ctrlx-engineer, codesys-lad and ctrlx-hmi, used by the ladder and HMI tools).
 """
 import csv
 import io
@@ -38,7 +39,9 @@ def _load_token() -> str:
 
 
 TOKEN = _load_token()
-SKILLS = os.environ.get("CTRLX_SKILLS_DIR", os.path.expanduser("~/.claude/skills"))
+_BUNDLED_SKILLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+SKILLS = os.environ.get("CTRLX_SKILLS_DIR") or (
+    _BUNDLED_SKILLS if os.path.isdir(_BUNDLED_SKILLS) else os.path.expanduser("~/.claude/skills"))
 
 mcp = FastMCP("ctrlx-engineering")
 
@@ -261,7 +264,7 @@ def _skill_script(skill: str, script: str) -> str:
     path = os.path.join(SKILLS, skill, "scripts", script)
     if not os.path.isfile(path):
         raise BridgeError(f"{path} not found: install the ctrlx-engineer and codesys-lad skills "
-                          "side by side in ~/.claude/skills, or set CTRLX_SKILLS_DIR")
+                          f"side by side in {SKILLS} (the release zip has them in skills/), or set CTRLX_SKILLS_DIR")
     return path
 
 

@@ -89,6 +89,10 @@ pass environment variables still works. Claude Code can do the same with
 
 ## Required skills (ladder and HMI tools)
 
+**The release zip already contains them** in `skills/` next to `server/`, and the server and the installer use that
+folder automatically, so with the zip there is nothing to install. The rest of this section is for a clone of the
+repository, or to update the skills.
+
 Most tools need nothing but this repo. The ladder and HMI tools run scripts from three skill folders (a `SKILL.md`
 with guidance plus Python scripts; the tools only run the scripts, so no particular agent is needed) that live in
 their own repositories. Install them first or those tools fail saying the skill script was not found:
@@ -116,7 +120,8 @@ On Linux/WSL:
 
 The ctrlx-hmi skill also needs templates that you make once from your own ctrlX PLC Engineering (they are exports of
 CODESYS objects, so they are not shipped); its README explains it under "First run". Set `CTRLX_SKILLS_DIR` to use
-another folder. The skills run on the machine where the MCP server runs, not on the
+another folder; without it the server looks in `skills/` next to `server/` (the release zip), then in
+`~/.claude/skills`. The skills run on the machine where the MCP server runs, not on the
 IDE machine. `scripts\install_windows.bat` only checks for them and prints these commands for any that are missing;
 it never installs them for you.
 

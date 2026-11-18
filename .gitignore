@@ -5,5 +5,7 @@ __pycache__/
 dist/
 scripts/config.bat
 broker/
+# the release zip bundles the skills here; a clone gets them from their own repositories
+skills/
 examples/**/build/*.export
 examples/**/build/*.native
