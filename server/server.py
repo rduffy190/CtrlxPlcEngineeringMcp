@@ -57,6 +57,29 @@ AUTOSTART = os.environ.get("CTRLX_AUTOSTART", "1") == "1" and os.name == "nt" an
 _autostart_tried = 0.0
 
 
+def _launch_outside_job(bat: str) -> bool:
+    """Run start_bridge.bat as a process that does not belong to this server's process tree.
+
+    MCP clients on Windows (the Python SDK, and so Claude Code and others) start the server inside a job
+    object that kills every process in it when the client disconnects, and do not allow breakaway. An IDE
+    started as our child would die with the agent session and lose unsaved work. A process created through
+    WMI (Win32_Process.Create) is not in that job. Returns False if that did not work."""
+    folder = os.path.dirname(bat)
+    command = f'cmd.exe /c ""{bat}" < NUL"'          # stdin from NUL: the script's closing `pause` returns
+    q = lambda s: s.replace("'", "''")                 # PowerShell single-quoted string
+    ps = ("$s = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}; "
+          f"$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+          f"@{{CommandLine='{q(command)}'; CurrentDirectory='{q(folder)}'; ProcessStartupInformation=$s}}; "
+          "exit [int]$r.ReturnValue")
+    try:
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _autostart() -> bool:
     """Start the IDE with the bridge and wait until it answers. At most one attempt per 5 minutes."""
     import time
@@ -65,10 +88,11 @@ def _autostart() -> bool:
     if not AUTOSTART or not os.path.exists(bat) or time.time() - _autostart_tried < 300:
         return False
     _autostart_tried = time.time()
-    # stdin from NUL so the script's closing `pause` returns at once.
-    subprocess.Popen(["cmd.exe", "/c", bat], cwd=os.path.dirname(bat), stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if not _launch_outside_job(bat):
+        # stdin from NUL so the script's closing `pause` returns at once.
+        subprocess.Popen(["cmd.exe", "/c", bat], cwd=os.path.dirname(bat), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     deadline = time.time() + 180
     while time.time() < deadline:
         time.sleep(3)

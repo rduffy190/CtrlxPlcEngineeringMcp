@@ -473,8 +473,16 @@ def h_build(a):
             raise ValueError("no active application; pass app")
     app.build()
     msgs = _messages()
-    errors = [m for m in msgs if "error" in m["severity"].lower()]
-    return {"errors": len(errors), "messages": msgs}
+    # The Messages pane also holds script output (the bridge's own log lines, Python warnings printed as
+    # errors). Count the compiler's own summary lines when they are there, and only fall back to counting
+    # error messages when they are not.
+    summary = [int(m.group(1)) for m in
+               (re.search(r"complete -- (\d+) errors?", x["text"]) for x in msgs) if m]
+    if summary:
+        n = sum(summary)
+    else:
+        n = len([m for m in msgs if "error" in m["severity"].lower()])
+    return {"errors": n, "messages": msgs}
 
 
 def h_messages(a):
